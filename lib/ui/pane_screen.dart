@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:ui' show ParagraphBuilder, ParagraphConstraints;
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
 import '../tmux/control.dart';
@@ -32,11 +34,28 @@ class _FnSink implements Sink<String> {
   void close() {}
 }
 
+/// Cell size TerminalView uses for [style] (same measurement as xterm's TerminalPainter, no text scaling).
+Size terminalCellSize(TerminalStyle style) {
+  const test = 'mmmmmmmmmm';
+  final ts = style.toTextStyle();
+  final b = ParagraphBuilder(ts.getParagraphStyle())
+    ..pushStyle(ts.getTextStyle())
+    ..addText(test);
+  final p = b.build()..layout(const ParagraphConstraints(width: double.infinity));
+  final size = Size(p.maxIntrinsicWidth / test.length, p.height);
+  p.dispose();
+  return size;
+}
+
+/// Whole cells of [cell] that fit in [area] (at least 10x5).
+(int, int) fitCells(Size area, Size cell) =>
+    (max(10, area.width ~/ cell.width), max(5, area.height ~/ cell.height));
+
 class PaneScreen extends StatefulWidget {
-  final SSHClient ssh;
+  final SSHClient? ssh; // null in tests (fake tmux)
   final TmuxClient client;
   final String session;
-  const PaneScreen({super.key, required this.ssh, required this.client, required this.session});
+  const PaneScreen({super.key, this.ssh, required this.client, required this.session});
 
   @override
   State<PaneScreen> createState() => _PaneScreenState();
@@ -53,9 +72,17 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   late final StreamSubscription<TmuxEvent> _sub;
   Timer? _reloadTimer;
 
-  // font: fit-to-width × _zoom (≥ 1)
-  double? _cwPerPt; // char width per font point
+  // Phone mode (default): tmux sizes the window to our cols×rows at font [_font] and the shown pane is
+  // kept zoomed. Desk mode: ignore-size, real pane size, font = fit-to-width × [_zoom] (≥ 1).
+  static const _phonePref = 'phoneMode';
+  bool? _phoneMode; // null until the pref is loaded: render as phone, send nothing yet
+  bool get _phone => _phoneMode ?? true;
+  double _font = 13;
   double _zoom = 1;
+  final _cells = <double, Size>{}; // font size → cell size
+  (int, int)? _wantSize, _sentSize;
+  Timer? _sizeTimer;
+  final _zoomedByUs = <int>{}; // window ids we zoomed; unzoomed when leaving
 
   // input
   bool _ctrl = false, _alt = false, _writing = false;
@@ -71,32 +98,89 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   Map<int, Offset>? _start;
   DateTime _t0 = DateTime.now();
   DateTime? _lastTwoTap;
-  double _startZoom = 1, _scale = 1;
+  double _startZoom = 1, _startFont = 13, _scale = 1;
   bool _pinching = false;
 
   WindowInfo? get _window => _windows.where((w) => w.id == _winId).firstOrNull;
   List<PaneRect> get _rects => _window?.panes ?? const [];
   PaneRect? get _rect => _rects.where((p) => p.id == _paneId).firstOrNull;
 
+  /// The shown pane's real size (zoomed: the visible-layout rect).
+  PaneRect? get _termRect => _paneId == null ? null : _window?.sizeOf(_paneId!);
+
+  Size _cell(double font) => _cells[font] ??= terminalCellSize(TerminalStyle(fontSize: font));
+
   @override
   void initState() {
     super.initState();
     _sub = client.events.listen(_onEvent);
-    widget.ssh.done.whenComplete(() => _exit('Connection closed'));
+    widget.ssh?.done.whenComplete(() => _exit('Connection closed'));
     _reload();
+    () async {
+      var phone = true;
+      try {
+        phone = (await SharedPreferences.getInstance()).getBool(_phonePref) ?? true;
+      } catch (_) {}
+      if (mounted) _setPhone(phone, persist: false);
+    }();
+  }
+
+  void _setPhone(bool on, {bool persist = true}) {
+    final was = _phoneMode;
+    setState(() => _phoneMode = on);
+    if (persist) SharedPreferences.getInstance().then((p) => p.setBool(_phonePref, on)).catchError((_) => true);
+    if (on) {
+      if (was == false) _run(client.ignoreSize(false));
+      _sentSize = _wantSize = null; // next build re-sends -C
+      _keepZoomed();
+    } else {
+      _run(client.ignoreSize(true));
+      _unzoomOurs();
+    }
+  }
+
+  /// Phone mode: called from build with the cells that fit; sends refresh-client -C after 150ms quiet.
+  void _fitClient((int, int) size) {
+    if (_phoneMode != true || size == _wantSize) return;
+    _wantSize = size;
+    _sizeTimer?.cancel();
+    _sizeTimer = Timer(const Duration(milliseconds: 150), () {
+      final s = _wantSize;
+      if (_phoneMode != true || !mounted || s == null || s == _sentSize) return;
+      _sentSize = s;
+      _run(client.setClientSize(s.$1, s.$2));
+    });
+  }
+
+  /// Phone mode: keep the shown pane zoomed so it gets the whole client size.
+  void _keepZoomed() {
+    final w = _window, id = _paneId;
+    if (_phoneMode != true || w == null || id == null || w.panes.length < 2) return;
+    if (!w.zoomed) _zoomedByUs.add(w.id);
+    _run(client.zoom(id)); // tmux checks the zoom flag itself; our cache may be stale
+  }
+
+  /// Best effort: give the desktop its layout back.
+  void _unzoomOurs() {
+    for (final w in _zoomedByUs) {
+      client.unzoom(w).then((_) {}, onError: (_) {});
+    }
+    _zoomedByUs.clear();
   }
 
   @override
   void dispose() {
     _sub.cancel();
     _reloadTimer?.cancel();
+    _sizeTimer?.cancel();
     _bump.dispose();
     for (final p in _panes.values) {
       p.focus.dispose();
     }
+    if (!_exited) _unzoomOurs(); // queued before detach-client, tmux runs them in order
     _exited = true;
     client.close().catchError((_) {});
-    widget.ssh.close();
+    widget.ssh?.close();
     super.dispose();
   }
 
@@ -151,6 +235,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       return; // connection errors surface through ExitEvent / ssh.done
     }
     if (!mounted || windows.isEmpty) return;
+    final before = (_winId, _paneId);
     setState(() {
       _windows = windows;
       final active = windows.where((w) => w.active).firstOrNull ?? windows.first;
@@ -166,12 +251,20 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         p.focus.dispose();
         return true;
       });
+      for (final w in windows) {
+        for (final r in w.visiblePanes) {
+          alive[r.id] = r; // zoomed pane: real size
+        }
+      }
       for (final e in _panes.entries) {
         final r = alive[e.key]!;
         if (e.value.term.viewWidth != r.w || e.value.term.viewHeight != r.h) e.value.term.resize(r.w, r.h);
       }
-      win.panes.forEach(_ensurePane);
+      for (final p in win.panes) {
+        _ensurePane(win.sizeOf(p.id)!);
+      }
     });
+    if ((_winId, _paneId) != before) _keepZoomed();
   }
 
   /// Creates the pane's Terminal at its tmux size and seeds it with capture-pane + cursor.
@@ -242,7 +335,12 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   void _text(String s) => _panes[_paneId]?.term.textInput(s);
 
-  void _run(Future<void> f) => f.catchError((Object e) {
+  void _bytes(List<int> b) {
+    if (_paneId != null) _run(client.sendBytes(_paneId!, b));
+  }
+
+  // then/onError, not catchError: helpers typed Future<void> are Future<List<String>> at runtime.
+  void _run(Future<void> f) => f.then((_) {}, onError: (Object e) {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
       });
 
@@ -250,12 +348,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   void _showPane(int id, {bool select = false}) {
     if (!mounted) return;
+    final hadKeyboard = _panes[_paneId]?.focus.hasFocus ?? false;
     setState(() {
       _paneId = id;
-      final r = _rect;
+      final r = _termRect;
       if (r != null) _ensurePane(r);
     });
-    if (select) _run(client.selectPane(id));
+    if (hadKeyboard) WidgetsBinding.instance.addPostFrameCallback((_) => _panes[id]?.focus.requestFocus());
+    if (select) _run(client.selectPane(id, keepZoom: _phone));
+    _keepZoomed();
   }
 
   void _move(Dir d) {
@@ -278,9 +379,12 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       _slideFrom = slideFrom;
       _winId = id;
       _paneId = w.activePane;
-      w.panes.forEach(_ensurePane);
+      for (final p in w.panes) {
+        _ensurePane(w.sizeOf(p.id)!);
+      }
     });
     _run(client.selectWindow(id));
+    _keepZoomed();
   }
 
   void _stepWindow(int delta) {
@@ -329,6 +433,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       _start = Map.of(_ptrs);
       _t0 = DateTime.now();
       _startZoom = _zoom;
+      _startFont = _font;
       _scale = 1;
       _pinching = false;
     } else {
@@ -343,7 +448,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (s == null || _ptrs.length != 2 || !s.keys.every(_ptrs.containsKey)) return;
     _scale = _spread(_ptrs) / _spread(s);
     if (!_pinching && (_scale - 1).abs() > 0.15) _pinching = true;
-    if (_pinching) setState(() => _zoom = (_startZoom * _scale).clamp(1.0, 4.0));
+    if (!_pinching) return;
+    setState(() {
+      if (_phone) {
+        _font = ((_startFont * _scale).clamp(8.0, 24.0) * 2).round() / 2; // 0.5 steps
+      } else {
+        _zoom = (_startZoom * _scale).clamp(1.0, 4.0);
+      }
+    });
   }
 
   void _up(PointerEvent e) {
@@ -352,7 +464,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       _start = null;
       final delta = _focal(_ptrs) - _focal(s);
       if (_pinching) {
-        if (_startZoom <= 1.001 && _scale < 0.7) _openOverview();
+        final atMin = _phone ? _startFont <= 8 : _startZoom <= 1.001;
+        if (atMin && _scale < 0.7) _openOverview();
       } else if (swipeDir(delta) case final d?) {
         _move(d);
       } else if (DateTime.now().difference(_t0).inMilliseconds < 300 && delta.distance < 20) {
@@ -431,6 +544,16 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   setSheet(() {});
                 },
               ),
+              SwitchListTile(
+                title: const Text('Phone mode'),
+                subtitle: const Text('Size tmux to this screen and zoom the shown pane. Off: mirror the '
+                    'desktop size and scale the font'),
+                value: _phone,
+                onChanged: (v) {
+                  _setPhone(v);
+                  setSheet(() {});
+                },
+              ),
             ]),
           ),
         ),
@@ -493,22 +616,18 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   // ---------- build ----------
 
-  double _charWidthPerPt() {
-    final tp = TextPainter(
-      text: TextSpan(text: 'mmmmmmmmmm', style: const TerminalStyle(fontSize: 100).toTextStyle()),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    return tp.width / 10 / 100;
-  }
-
   @override
   Widget build(BuildContext context) {
+    // Height the keyboard takes from the terminal area (the Scaffold shrinks the body by the inset,
+    // SafeArea gives back the nav-bar padding the keyboard covers). Phone mode sizes tmux WITHOUT it,
+    // so showing the keyboard does not resize the pane; the view just scrolls.
+    final kb = max(0.0, MediaQuery.viewInsetsOf(context).bottom - MediaQuery.viewPaddingOf(context).bottom);
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(children: [
           _topBar(),
-          Expanded(child: _terminalArea()),
+          Expanded(child: _terminalArea(kb)),
           _extraKeys(),
         ]),
       ),
@@ -554,67 +673,65 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     );
   }
 
-  Widget _terminalArea() {
-    final r = _rect;
-    final p = _panes[_paneId];
-    if (r == null || p == null) return const Center(child: CircularProgressIndicator());
-    final cw = _cwPerPt ??= _charWidthPerPt();
-    return LayoutBuilder(builder: (context, c) {
-      final font = c.maxWidth / (r.w * cw) * _zoom;
-      final width = max(c.maxWidth, r.w * cw * font);
-      final view = KeyedSubtree(
-        key: ValueKey(r.id),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          physics: _zoom > 1 ? null : const NeverScrollableScrollPhysics(),
-          child: SizedBox(
-            width: width,
-            height: c.maxHeight,
-            child: MediaQuery.removePadding(
-              context: context,
-              removeTop: true,
-              removeBottom: true,
-              removeLeft: true,
-              removeRight: true,
-              child: TerminalView(
-                p.term,
-                focusNode: p.focus,
-                autofocus: true,
-                autoResize: false,
-                deleteDetection: true,
-                textScaler: TextScaler.noScaling,
-                textStyle: TerminalStyle(fontSize: font),
+  Widget _terminalArea(double kb) => LayoutBuilder(builder: (context, c) {
+        if (_phone) _fitClient(fitCells(Size(c.maxWidth, c.maxHeight + kb), _cell(_font)));
+        final r = _termRect;
+        final p = _panes[_paneId];
+        if (r == null || p == null) return const Center(child: CircularProgressIndicator());
+        final cwPerPt = _cell(100).width / 100;
+        final font = _phone ? _font : c.maxWidth / (r.w * cwPerPt) * _zoom;
+        final width = max(c.maxWidth, r.w * cwPerPt * font);
+        final view = KeyedSubtree(
+          key: ValueKey(r.id),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            physics: width > c.maxWidth + 1 ? null : const NeverScrollableScrollPhysics(),
+            child: SizedBox(
+              width: width,
+              height: c.maxHeight,
+              child: MediaQuery.removePadding(
+                context: context,
+                removeTop: true,
+                removeBottom: true,
+                removeLeft: true,
+                removeRight: true,
+                child: TerminalView(
+                  p.term,
+                  focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
+                  autoResize: false,
+                  deleteDetection: true,
+                  textScaler: TextScaler.noScaling,
+                  textStyle: TerminalStyle(fontSize: font),
+                ),
               ),
             ),
           ),
-        ),
-      );
-      return Listener(
-        onPointerDown: _down,
-        onPointerMove: _moveP,
-        onPointerUp: _up,
-        onPointerCancel: _up,
-        child: ClipRect(
-          child: AnimatedBuilder(
-            animation: _bump,
-            builder: (context, child) => Transform.translate(
-              offset: _bumpDir * 30 * sin(pi * _bump.value),
-              child: child,
-            ),
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 220),
-              transitionBuilder: (child, anim) {
-                final incoming = child.key == ValueKey(_paneId);
-                final tween = Tween(begin: incoming ? _slideFrom : -_slideFrom, end: Offset.zero);
-                return SlideTransition(position: tween.animate(anim), child: child);
-              },
-              child: view,
+        );
+        return Listener(
+          onPointerDown: _down,
+          onPointerMove: _moveP,
+          onPointerUp: _up,
+          onPointerCancel: _up,
+          child: ClipRect(
+            child: AnimatedBuilder(
+              animation: _bump,
+              builder: (context, child) => Transform.translate(
+                offset: _bumpDir * 30 * sin(pi * _bump.value),
+                child: child,
+              ),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                transitionBuilder: (child, anim) {
+                  final incoming = child.key == ValueKey(_paneId);
+                  final tween = Tween(begin: incoming ? _slideFrom : -_slideFrom, end: Offset.zero);
+                  return SlideTransition(position: tween.animate(anim), child: child);
+                },
+                child: view,
+              ),
             ),
           ),
-        ),
-      );
-    });
-  }
+        );
+      });
 
   Widget _extraKeys() {
     Widget btn(String label, VoidCallback onTap, {bool on = false}) => InkWell(
@@ -637,14 +754,13 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           btn('Tab', () => _key(TerminalKey.tab)),
           btn('Ctrl', () => setState(() => _ctrl = !_ctrl), on: _ctrl),
           btn('Alt', () => setState(() => _alt = !_alt), on: _alt),
+          btn('^C', () => _bytes(const [0x03])),
           btn('←', () => _key(TerminalKey.arrowLeft)),
           btn('↓', () => _key(TerminalKey.arrowDown)),
           btn('↑', () => _key(TerminalKey.arrowUp)),
           btn('→', () => _key(TerminalKey.arrowRight)),
+          btn('Prefix', () => _bytes(const [0x02])),
           for (final s in const ['|', '~', '/', '-']) btn(s, () => _text(s)),
-          btn('Prefix', () {
-            if (_paneId != null) _run(client.sendBytes(_paneId!, const [0x02]));
-          }),
         ]),
       ),
     );

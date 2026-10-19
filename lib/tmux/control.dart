@@ -78,7 +78,15 @@ class WindowInfo {
   final List<PaneRect> panes;
   final int activePane;
   final bool zoomed;
-  const WindowInfo(this.id, this.index, this.name, this.active, this.panes, this.activePane, this.zoomed);
+
+  /// From #{window_visible_layout}: while zoomed, only the zoomed pane at its real (full-window) size.
+  final List<PaneRect> visiblePanes;
+  const WindowInfo(this.id, this.index, this.name, this.active, this.panes, this.activePane, this.zoomed,
+      [this.visiblePanes = const []]);
+
+  /// Real size of pane [id]: its visible rect if shown, else its layout rect.
+  PaneRect? sizeOf(int id) =>
+      visiblePanes.where((p) => p.id == id).firstOrNull ?? panes.where((p) => p.id == id).firstOrNull;
 }
 
 class TmuxError implements Exception {
@@ -202,12 +210,13 @@ class TmuxClient {
   /// Windows of the attached session, sorted by index.
   Future<List<WindowInfo>> listWindows() async {
     final lines = await cmd("list-windows -F '#{window_id} #{window_index} #{window_active} "
-        "#{window_zoomed_flag} #{pane_id} #{window_layout} #{window_name}'");
+        "#{window_zoomed_flag} #{pane_id} #{window_layout} #{window_visible_layout} #{window_name}'");
     final ws = [
       for (final l in lines)
-        if (l.split(' ') case [final id, final idx, final act, final zoom, final pane, final layout, ...final name])
+        if (l.split(' ')
+            case [final id, final idx, final act, final zoom, final pane, final layout, final vis, ...final name])
           WindowInfo(_id(id), int.parse(idx), name.join(' '), act == '1', parseLayout(layout), _id(pane),
-              zoom == '1'),
+              zoom == '1', parseLayout(vis)),
     ]..sort((a, b) => a.index.compareTo(b.index));
     return ws;
   }
@@ -238,7 +247,9 @@ class TmuxClient {
     return (int.parse(l[0]), int.parse(l[1]));
   }
 
-  Future<void> selectPane(int paneId) => cmd('select-pane -t %$paneId');
+  /// keepZoom: `-Z`, a zoomed window stays zoomed (on the new pane).
+  Future<void> selectPane(int paneId, {bool keepZoom = false}) =>
+      cmd('select-pane ${keepZoom ? '-Z ' : ''}-t %$paneId');
   Future<void> selectWindow(int windowId) => cmd('select-window -t @$windowId');
   Future<void> switchSession(String name) => cmd('switch-client -t ${_q(name)}');
   Future<void> newWindow() => cmd('new-window');
@@ -248,6 +259,20 @@ class TmuxClient {
       cmd('split-window ${horizontal ? '-h' : '-v'} -t %$paneId');
   Future<void> killPane(int paneId) => cmd('kill-pane -t %$paneId');
   Future<void> toggleZoom(int paneId) => cmd('resize-pane -Z -t %$paneId');
+
+  /// Zooms the pane unless its window is already zoomed (checked by tmux, so no race with our cache).
+  Future<void> zoom(int paneId) =>
+      cmd("if -F -t %$paneId '#{?window_zoomed_flag,,1}' 'resize-pane -Z -t %$paneId'");
+
+  /// Unzooms the window if it is zoomed.
+  Future<void> unzoom(int windowId) =>
+      cmd("if -F -t @$windowId '#{window_zoomed_flag}' 'resize-pane -Z -t @$windowId'");
+
+  /// This client's size in cells (only counts while ignore-size is off).
+  Future<void> setClientSize(int cols, int rows) => cmd('refresh-client -C ${cols}x$rows');
+
+  /// on: tmux ignores this client's size when sizing windows.
+  Future<void> ignoreSize(bool on) => cmd('refresh-client -f ${on ? '' : '!'}ignore-size');
 
   Future<void> newSession(String name) async {
     await cmd('new-session -d -s ${_q(name)}');

@@ -75,6 +75,24 @@ void main() {
     expect(cx, greaterThanOrEqualTo(0));
     expect(cy, greaterThan(0));
 
+    // phone mode: client size counts, zoom keeps the shown pane at the full client size
+    await c.ignoreSize(false);
+    await c.setClientSize(50, 30);
+    await c.zoom(p1);
+    await c.zoom(p1); // idempotent: must not toggle back
+    var w = (await c.listWindows())[0];
+    expect(w.zoomed, true);
+    expect(w.panes, hasLength(2)); // window_layout: unzoomed geometry
+    expect(w.sizeOf(p1)!.w, 50); // visible layout: zoomed pane fills the client
+    expect(w.sizeOf(p1)!.h, 30); // control clients have no status line
+    await c.selectPane(p0, keepZoom: true);
+    w = (await c.listWindows())[0];
+    expect((w.zoomed, w.activePane), (true, p0));
+    await c.unzoom(w.id);
+    await c.unzoom(w.id); // idempotent
+    expect((await c.listWindows())[0].zoomed, false);
+    await c.ignoreSize(true);
+
     await expectLater(c.cmd('select-window -t @999'), throwsA(isA<TmuxError>()));
 
     await c.newWindow();

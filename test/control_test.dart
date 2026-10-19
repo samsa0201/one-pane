@@ -100,14 +100,16 @@ void main() {
 
     final lw = c.listWindows();
     reply([
-      '@1 2 0 0 %2 cbff,160x48,0,0,2 logs x',
-      '@0 1 1 1 %1 8b5f,160x48,0,0{80x48,0,0,0,79x48,81,0,1} fish',
+      '@1 2 0 0 %2 cbff,160x48,0,0,2 cbff,160x48,0,0,2 logs x',
+      '@0 1 1 1 %1 8b5f,160x48,0,0{80x48,0,0,0,79x48,81,0,1} 1c2f,160x48,0,0,1 fish',
     ]);
     final ws = await lw;
     expect(w.last, startsWith('list-windows -F '));
     expect(ws.map((x) => x.index), [1, 2]);
     expect((ws[0].id, ws[0].active, ws[0].zoomed, ws[0].activePane, ws[0].name), (0, true, true, 1, 'fish'));
     expect(ws[0].panes.map((p) => p.id), [0, 1]);
+    expect(ws[0].visiblePanes.map((p) => (p.id, p.w, p.h)), [(1, 160, 48)]);
+    expect(ws[1].visiblePanes.single.id, 2);
     expect(ws[1].name, 'logs x');
 
     final sb = c.sendBytes(3, List.generate(300, (i) => i & 0xff));
@@ -126,6 +128,21 @@ void main() {
     final cu = c.cursor(3);
     reply(['5 7']);
     expect(await cu, (5, 7));
+
+    for (final (f, want) in [
+      (() => c.selectPane(4), 'select-pane -t %4'),
+      (() => c.selectPane(4, keepZoom: true), 'select-pane -Z -t %4'),
+      (() => c.zoom(4), "if -F -t %4 '#{?window_zoomed_flag,,1}' 'resize-pane -Z -t %4'"),
+      (() => c.unzoom(2), "if -F -t @2 '#{window_zoomed_flag}' 'resize-pane -Z -t @2'"),
+      (() => c.setClientSize(50, 40), 'refresh-client -C 50x40'),
+      (() => c.ignoreSize(true), 'refresh-client -f ignore-size'),
+      (() => c.ignoreSize(false), 'refresh-client -f !ignore-size'),
+    ]) {
+      final r = f();
+      reply([]);
+      await r;
+      expect(w.last, '$want\n');
+    }
 
     final ns = c.newSession("it's");
     reply([]);

@@ -133,7 +133,8 @@ Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h) async {
       await Future<void>.delayed(const Duration(milliseconds: 100)); // let stderr drain
       throw Exception('tmux exited (code ${session.exitCode}): ${stderr.toString().trim()}');
     });
-    await Future.any([tmux.cmd('refresh-client -f ignore-size'), exited])
+    // Probe only; the client size policy (ignore-size or -C) is the pane screen's (phone/desk mode).
+    await Future.any([tmux.cmd("display -p '#{version}'"), exited])
         .timeout(const Duration(seconds: 15));
     return (ssh, tmux);
   } catch (e) {

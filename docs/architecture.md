@@ -19,8 +19,21 @@ SSH exec `<tmuxCmd> -C new-session -A -s <session>` (no PTY). tmux then speaks a
 - Window layout string: `8b5f,160x48,0,0{80x48,0,0,0,79x48,81,0,1}` = checksum, then a cell
   `WxH,X,Y` followed by either `,<paneId>` (leaf) or `{...}` (children side by side, left→right) or
   `[...]` (children stacked, top→bottom), children comma-separated. Leaf pane id N means `%N`.
-- After attach run `refresh-client -f ignore-size` so the phone does NOT shrink the desktop layout.
-  Panes keep their real size; the phone renders the pane at exactly WxH cells and scales the font.
+- Client size is the pane screen's decision (connectTmux only probes with `display -p`). Control
+  clients without a size are ignored for window sizing.
+  - Phone mode (default, pref `phoneMode` in shared_preferences): the pane screen computes cols×rows that
+    fit its terminal area at the current font (cell size measured like xterm's TerminalPainter; area
+    WITHOUT the keyboard) and sends `refresh-client -C <cols>x<rows>` (debounced 150ms; again on
+    rotation / font change). The shown pane is kept zoomed (`zoom()` = `resize-pane -Z` unless tmux says
+    the window is already zoomed; moving uses `select-pane -Z`). Windows we zoomed are unzoomed (best
+    effort, `unzoom()`) when the screen closes or desk mode is switched on. Control clients have no
+    status line, so a zoomed pane gets exactly cols×rows.
+  - Desk mode: `refresh-client -f ignore-size` so the phone does NOT shrink the desktop layout; panes keep
+    their real size and the phone scales the font to fit the width (pinch: zoom + horizontal scroll).
+    Switching back sends `refresh-client -f !ignore-size`.
+- While zoomed, `#{window_layout}` still describes the unzoomed geometry (minimap, neighbor()), and
+  `#{window_visible_layout}` the real sizes (only the zoomed pane). Terminal size of a pane =
+  `WindowInfo.sizeOf(id)`: its visible rect, else its layout rect.
 - Input: `send-keys -t %N -H <hex bytes ...>` (raw bytes from the terminal widget).
 - Seed a pane when shown: `capture-pane -p -e -J -t %N` (visible screen) and
   `display -p -t %N '#{cursor_x} #{cursor_y}'`.
@@ -54,7 +67,9 @@ class ExitEvent extends TmuxEvent { final String? reason; }
 
 class SessionInfo { final int id; final String name; final int windows; final bool attached; }
 class WindowInfo  { final int id; final int index; final String name; final bool active;
-                    final List<PaneRect> panes; final int activePane; final bool zoomed; }
+                    final List<PaneRect> panes; final int activePane; final bool zoomed;
+                    final List<PaneRect> visiblePanes;   // #{window_visible_layout}, optional last ctor arg
+                    PaneRect? sizeOf(int id); }          // visible rect, else layout rect
 
 class TmuxClient {
   TmuxClient(Stream<List<int>> stdout, void Function(String data) write);  // client calls write('<cmd>\n')
@@ -66,11 +81,15 @@ class TmuxClient {
   Future<void> sendBytes(int paneId, List<int> bytes);   // send-keys -H, chunk ≤ 256 bytes/command
   Future<String> capturePane(int paneId);       // capture-pane -p -e -J, lines joined with \r\n
   Future<(int, int)> cursor(int paneId);        // (x, y)
-  Future<void> selectPane(int paneId);          // select-pane -t %N
+  Future<void> selectPane(int paneId, {bool keepZoom = false}); // select-pane [-Z] -t %N
   Future<void> selectWindow(int windowId);      // select-window -t @N
   Future<void> switchSession(String name);      // switch-client -t <name>
   Future<void> newWindow();  Future<void> split(int paneId, {required bool horizontal});
   Future<void> killPane(int paneId); Future<void> toggleZoom(int paneId);
+  Future<void> zoom(int paneId);                // zoom unless the window is zoomed (if -F, checked by tmux)
+  Future<void> unzoom(int windowId);            // unzoom if zoomed
+  Future<void> setClientSize(int cols, int rows); // refresh-client -C <cols>x<rows>
+  Future<void> ignoreSize(bool on);             // refresh-client -f ignore-size | !ignore-size
   Future<void> newSession(String name);         // new-session -d -s name, then switchSession
   Future<void> close();                         // detach-client, completes pending cmds with error
 }
@@ -84,6 +103,7 @@ like a shell.
 class HostConfig { String id, name, host; int port; String user; String? password; String? privateKeyPem;
                    String tmuxCmd /* default 'tmux' */; String session /* default 'main' */; toJson/fromJson }
 Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h);  // dartssh2 execute(), wires stdout/stdin
+// PaneScreen({SSHClient? ssh, required TmuxClient client, required String session}) — ssh null in widget tests.
 ```
 Secrets (password, key) live in flutter_secure_storage; the rest of HostConfig in shared_preferences.
 
@@ -93,12 +113,13 @@ Secrets (password, key) live in flutter_secure_storage; the rest of HostConfig i
 - `overview.dart`: window overview + session/window tree.
 
 ## UX
-Semantic zoom with pinch: pane (font size) → pinch below fit-to-width → window overview (all panes of
+Semantic zoom with pinch: pane (font size) → pinch below min font (phone) / fit-to-width (desk) → window overview (all panes of
 the window drawn at their real relative positions, live text thumbnails, tap one to enter) → pinch
 further → session map (all windows of all sessions as cards). Pinch out reverses.
 
 Pane screen:
-- Terminal fills the screen at exactly the pane's cols×rows; font scaled to width by default.
+- Phone mode: terminal at font 13 (pinch 8–24), tmux sized to fit, shown pane zoomed. Desk mode: exactly
+  the pane's cols×rows, font scaled to width. Keyboard hidden on open (tap terminal / keyboard button).
 - Top bar: `session › window-index:name` + a mini-map of the window's panes (rectangles at relative
   positions, current one filled). Tap the bar → session/window sheet.
 - Two-finger swipe left/right/up/down → move to the spatial neighbour (`neighbor()`), with a slide
@@ -107,13 +128,16 @@ Pane screen:
 - Swipe on the top bar left/right → previous/next window.
 - Two-finger double tap → toggle tmux zoom on the pane.
 - Long-press mini-map → pane actions: split ↔ / ↕, kill, zoom, new window.
-- Bottom extra-keys row: Esc Tab Ctrl Alt ← ↓ ↑ → | ~ / - and a "prefix" key (sends C-b; configurable).
+- Bottom extra-keys row (horizontally scrollable): Esc Tab Ctrl Alt ^C ← ↓ ↑ → Prefix | ~ / -
+  (^C sends 0x03, Prefix sends C-b).
 - Android edge swipes are reserved by the system back gesture → no edge-swipe gestures.
 - If the active pane in tmux changes from the desktop, the phone follows only when "follow" is on
   (toggle in the sheet; default on).
 
 ## Testing
 - Pure Dart unit tests for layout + control parser (fixture above).
+- Widget test: `test/widget_pane_screen_test.dart` drives PaneScreen against a fake tmux (scripted
+  `%begin`/`%end` replies, recorded commands): client size, zoom, two-finger swipes, keyboard hidden.
 - Integration test: `test/tmux_live_test.dart` spawns `tmux -L pocket-test -C new -A -s t` as a
   Process and drives TmuxClient against it (real tmux 3.6 on the dev host). Always use a separate
   `-L` socket in tests and on the dev host — never touch the user's default tmux server.
