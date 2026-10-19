@@ -71,6 +71,16 @@ void main() {
     final screen = await c.capturePane(p1);
     expect(screen, contains('pocket42'));
     expect(screen.split('\r\n').length, lessThanOrEqualTo(ws[0].panes.firstWhere((p) => p.id == p1).h));
+    expect(await c.paneCommands(), {p0: 'sh', p1: 'sh'});
+    await c.sendBytes(p1, utf8.encode('seq 1 100\r'));
+    var hist = '';
+    for (var i = 0; i < 100 && !hist.contains('\r\n20\r\n'); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      hist = await c.captureHistory(p1);
+    }
+    expect(hist, contains('\r\n20\r\n')); // scrolled off the 40-row pane
+    expect(hist, isNot(contains('\r\n100'))); // still on screen
+
     final (cx, cy) = await c.cursor(p1);
     expect(cx, greaterThanOrEqualTo(0));
     expect(cy, greaterThan(0));

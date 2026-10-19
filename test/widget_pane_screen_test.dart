@@ -7,11 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tmux_pocket/tmux/control.dart';
 import 'package:tmux_pocket/ui/pane_screen.dart';
+import 'package:xterm/xterm.dart';
 
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
 
-/// Fake tmux: every command gets `%begin` / scripted lines / `%end`.
-(TmuxClient, List<String>) fakeTmux({bool twoWindows = false}) {
+/// Fake tmux: every command gets `%begin` / scripted lines / `%end`. The controller is tmux's stdout.
+(TmuxClient, List<String>, StreamController<List<int>>) fakeTmux({bool twoWindows = false}) {
   final out = StreamController<List<int>>();
   final cmds = <String>[];
   var n = 0;
@@ -21,6 +22,8 @@ const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,
             if (twoWindows) '@2 1 0 0 %5 b25f,160x48,0,0,5 b25f,160x48,0,0,5 logs',
           ],
         _ when c.startsWith('list-sessions') => [r'$0 1 1 main'],
+        _ when c.startsWith('list-panes') => ['%0 fish', '%1 vim', '%2 htop', '%5 tail'],
+        _ when c.startsWith('capture-pane') && c.contains(' -S ') => ['old line 1', 'old line 2'],
         _ when c.startsWith('capture-pane') => ['hello'],
         _ when c.startsWith('display') => ['0 0'],
         _ => [],
@@ -32,16 +35,20 @@ const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,
     n++;
     out.add(utf8.encode('%begin 1 $n 1\n${replyFor(c).map((l) => '$l\n').join()}%end 1 $n 1\n'));
   });
-  return (client, cmds);
+  return (client, cmds, out);
 }
 
-Future<List<String>> pumpScreen(WidgetTester tester, {bool twoWindows = false}) async {
+late StreamController<List<int>> _out; // stdout of the last pumpScreen's fake tmux
+
+Future<List<String>> pumpScreen(WidgetTester tester,
+    {bool twoWindows = false, Future<(Null, TmuxClient)> Function()? reconnect}) async {
   SharedPreferences.setMockInitialValues({});
   tester.view.physicalSize = const Size(1080, 2400);
   tester.view.devicePixelRatio = 2.75;
   addTearDown(tester.view.reset);
-  final (client, cmds) = fakeTmux(twoWindows: twoWindows);
-  await tester.pumpWidget(MaterialApp(home: PaneScreen(client: client, session: 'main')));
+  final (client, cmds, out) = fakeTmux(twoWindows: twoWindows);
+  _out = out;
+  await tester.pumpWidget(MaterialApp(home: PaneScreen(client: client, session: 'main', reconnect: reconnect)));
   await tester.pump(const Duration(milliseconds: 50));
   await tester.pump(const Duration(milliseconds: 200)); // size debounce
   return cmds;
@@ -93,7 +100,7 @@ void main() {
 
   testWidgets('desk mode pref: ignore-size, no client size, no zoom', (tester) async {
     SharedPreferences.setMockInitialValues({'phoneMode': false});
-    final (client, cmds) = fakeTmux();
+    final (client, cmds, _) = fakeTmux();
     await tester.pumpWidget(MaterialApp(home: PaneScreen(client: client, session: 'main')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(cmds, contains('refresh-client -f ignore-size'));
@@ -105,5 +112,85 @@ void main() {
     await tester.fling(find.textContaining('0:main'), const Offset(-200, 0), 1000);
     await tester.pumpAndSettle();
     expect(cmds, contains('select-window -t @2'));
+  });
+
+  testWidgets('edge hints show the neighbour commands', (tester) async {
+    await pumpScreen(tester);
+    await tester.pump();
+    expect(find.text('vim ›'), findsOneWidget); // %1 is right of %0
+    expect(find.textContaining('‹'), findsNothing); // window edge
+    expect(find.textContaining('˄'), findsNothing);
+    expect(find.textContaining('˅'), findsNothing);
+    final hint = find.ancestor(of: find.text('vim ›'), matching: find.byType(IgnorePointer)).first;
+    expect(tester.widget<IgnorePointer>(hint).ignoring, true);
+  });
+
+  testWidgets('overview button opens the overview, picking a pane keeps the zoom', (tester) async {
+    final cmds = await pumpScreen(tester);
+    await tester.tap(find.byIcon(Icons.grid_view));
+    await tester.pumpAndSettle();
+    for (final id in ['%0', '%1', '%2']) {
+      expect(find.text(id), findsOneWidget);
+    }
+    await tester.tap(find.text('%2'));
+    await tester.pumpAndSettle();
+    expect(cmds, contains('select-pane -Z -t %2'));
+  });
+
+  testWidgets('pulling down past the top shows tmux history; LIVE or a key dismisses it', (tester) async {
+    final cmds = await pumpScreen(tester);
+    await tester.dragFrom(const Offset(150, 300), const Offset(0, 300));
+    await tester.pumpAndSettle();
+    expect(cmds, contains('capture-pane -p -e -J -S -2000 -E -1 -t %0'));
+    expect(find.text('LIVE'), findsOneWidget);
+    expect(find.byType(TerminalView), findsNWidgets(2));
+    await tester.tap(find.text('LIVE'));
+    await tester.pump();
+    expect(find.text('LIVE'), findsNothing);
+
+    await tester.dragFrom(const Offset(150, 300), const Offset(0, 300));
+    await tester.pumpAndSettle();
+    expect(find.text('LIVE'), findsOneWidget);
+    await tester.tap(find.text('Esc'));
+    await tester.pump();
+    expect(find.text('LIVE'), findsNothing);
+  });
+
+  testWidgets('connection drop: banner, reconnect, new client used', (tester) async {
+    late List<String> cmds2;
+    var calls = 0;
+    await pumpScreen(tester, reconnect: () async {
+      calls++;
+      final (c, cmds, _) = fakeTmux();
+      cmds2 = cmds;
+      return (null, c);
+    });
+    await _out.close();
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(find.text('Reconnecting…'), findsOneWidget);
+    expect(calls, 0);
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 1);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 200)); // size debounce
+    expect(find.text('Reconnecting…'), findsNothing);
+    expect(cmds2, contains(startsWith('list-windows')));
+    expect(cmds2, contains('capture-pane -p -e -J -t %0'));
+    expect(cmds2, contains(startsWith('refresh-client -C ')));
+    expect(cmds2, contains("if -F -t %0 '#{?window_zoomed_flag,,1}' 'resize-pane -Z -t %0'"));
+  });
+
+  testWidgets('killed session (%sessions-changed + %exit) does not reconnect', (tester) async {
+    var calls = 0;
+    await pumpScreen(tester, reconnect: () async {
+      calls++;
+      return (null, fakeTmux().$1);
+    });
+    _out.add(utf8.encode('%sessions-changed\n%exit\n'));
+    await _out.close();
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.text('Reconnecting…'), findsNothing);
+    expect(calls, 0);
+    expect(find.text('Session ended'), findsOneWidget);
   });
 }

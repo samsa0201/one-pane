@@ -19,6 +19,7 @@ import 'overview.dart';
 class _Pane {
   final Terminal term;
   final FocusNode focus = FocusNode();
+  final scroll = ScrollController(); // the live view's own scrollback
   late final ByteConversionSink decoder;
   int state = 0; // 0 capturing (drop output, capture has it), 1 awaiting cursor (buffer), 2 live
   final pending = <List<int>>[];
@@ -55,22 +56,32 @@ class PaneScreen extends StatefulWidget {
   final SSHClient? ssh; // null in tests (fake tmux)
   final TmuxClient client;
   final String session;
-  const PaneScreen({super.key, this.ssh, required this.client, required this.session});
+
+  /// Opens a fresh connection after a drop; null: a drop closes the screen.
+  final Future<(SSHClient?, TmuxClient)> Function()? reconnect;
+  const PaneScreen({super.key, this.ssh, required this.client, required this.session, this.reconnect});
 
   @override
   State<PaneScreen> createState() => _PaneScreenState();
 }
 
-class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateMixin {
-  TmuxClient get client => widget.client;
+class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  late TmuxClient client = widget.client;
+  late SSHClient? _ssh = widget.ssh;
 
   late String _session = widget.session;
   List<WindowInfo> _windows = [];
   int? _winId, _paneId;
   bool _follow = true, _jumpToActive = false, _exited = false;
   final _panes = <int, _Pane>{};
-  late final StreamSubscription<TmuxEvent> _sub;
-  Timer? _reloadTimer;
+  late StreamSubscription<TmuxEvent> _sub;
+  Timer? _reloadTimer, _cmdTimer;
+  Map<int, String> _commands = {}; // pane id → #{pane_current_command}, for the edge hints
+  (int, Terminal)? _history; // read-only tmux scrollback overlay of that pane
+  double _pull = 0; // px dragged down at the top of the live view in this gesture
+  int _gesturePtrs = 0; // max fingers down in this gesture
+  bool _reconnecting = false;
+  TmuxEvent? _lastEvent; // ignoring output; %sessions-changed right before %exit = session killed
 
   // Phone mode (default): tmux sizes the window to our cols×rows at font [_font] and the shown pane is
   // kept zoomed. Desk mode: ignore-size, real pane size, font = fit-to-width × [_zoom] (≥ 1).
@@ -113,9 +124,16 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   @override
   void initState() {
     super.initState();
-    _sub = client.events.listen(_onEvent);
-    widget.ssh?.done.whenComplete(() => _exit('Connection closed'));
+    WidgetsBinding.instance.addObserver(this);
+    _attach();
     _reload();
+    // pane_current_command changes without a tmux notification
+    _cmdTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      final visible = ModalRoute.of(context)?.isCurrent ?? true;
+      if (visible && !_reconnecting && !_exited && WidgetsBinding.instance.lifecycleState != AppLifecycleState.paused) {
+        _loadCommands();
+      }
+    });
     () async {
       var phone = true;
       try {
@@ -170,18 +188,104 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sub.cancel();
     _reloadTimer?.cancel();
+    _cmdTimer?.cancel();
     _sizeTimer?.cancel();
     _bump.dispose();
     for (final p in _panes.values) {
       p.focus.dispose();
+      p.scroll.dispose();
     }
     if (!_exited) _unzoomOurs(); // queued before detach-client, tmux runs them in order
     _exited = true;
     client.close().catchError((_) {});
-    widget.ssh?.close();
+    _ssh?.close();
     super.dispose();
+  }
+
+  // ---------- connection ----------
+
+  /// Listens to the current client / ssh; callbacks from replaced ones are ignored.
+  void _attach() {
+    final c = client, ssh = _ssh;
+    _sub = c.events.listen(_onEvent);
+    c.done.then((_) {
+      if (c == client) _lost('Connection lost');
+    });
+    ssh?.done.whenComplete(() {
+      if (ssh == _ssh) _lost('Connection closed');
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || _exited || _reconnecting) return;
+    // The socket may have died silently while we were in the background: probe it.
+    final c = client;
+    c.cmd("display -p ok").timeout(const Duration(seconds: 5)).then((_) {}, onError: (_) {
+      if (c == client) _lost('Connection lost');
+    });
+  }
+
+  /// Connection dropped (not by us): reconnect if we can, else leave.
+  void _lost(String msg) {
+    if (_exited || !mounted || _reconnecting) return;
+    if (widget.reconnect == null) return _exit(msg);
+    _reconnectLoop();
+  }
+
+  /// Retries with backoff 1, 2, 4, 8, 15, 15... s for about 2 minutes.
+  Future<void> _reconnectLoop() async {
+    setState(() => _reconnecting = true);
+    _sub.cancel();
+    client.close().catchError((_) {});
+    _ssh?.close();
+    final until = DateTime.now().add(const Duration(minutes: 2));
+    var delay = 1;
+    Object? error;
+    while (DateTime.now().isBefore(until)) {
+      await Future<void>.delayed(Duration(seconds: delay));
+      delay = min(delay * 2, 15);
+      if (!mounted || _exited) return;
+      try {
+        final (ssh, c) = await widget.reconnect!();
+        if (!mounted || _exited) {
+          c.close().catchError((_) {});
+          ssh?.close();
+          return;
+        }
+        client = c;
+        _ssh = ssh;
+        _attach();
+        await _restore();
+        if (mounted) setState(() => _reconnecting = false);
+        return;
+      } catch (e) {
+        error = e;
+      }
+    }
+    _reconnecting = false;
+    _exit('Reconnect failed: $error');
+  }
+
+  /// After a reconnect: same window/pane if they still exist, panes reseeded, size/zoom re-sent.
+  Future<void> _restore() async {
+    for (final p in _panes.values) {
+      p.state = 0; // drop output until reseeded
+    }
+    final old = _panes.keys.toSet();
+    await _reload(keepIds: true); // creates (and seeds) new panes, drops dead ones
+    for (final e in _panes.entries) {
+      if (old.contains(e.key)) _seed(e.key, e.value, reset: true);
+    }
+    if (_phoneMode == false) {
+      _run(client.ignoreSize(true));
+    } else {
+      setState(() => _sentSize = _wantSize = null); // next build re-sends -C
+      _keepZoomed();
+    }
   }
 
   // ---------- tmux events ----------
@@ -208,10 +312,18 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           _showPane(e.paneId);
         }
       case ExitEvent():
-        _exit(e.reason ?? 'tmux exited');
+        final r = e.reason ?? '';
+        // tmux 3.6 sends a bare %exit both for a detach and a killed session; a kill is announced by
+        // %sessions-changed just before.
+        if (_lastEvent is SessionsChangedEvent || RegExp('session|server exited').hasMatch(r)) {
+          _exit(r.isEmpty ? 'Session ended' : r);
+        } else {
+          _lost(r.isEmpty ? 'tmux exited' : r);
+        }
       case SessionsChangedEvent():
         break;
     }
+    if (e is! OutputEvent) _lastEvent = e;
   }
 
   void _exit(String msg) {
@@ -227,20 +339,21 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _reloadTimer = Timer(const Duration(milliseconds: 100), _reload);
   }
 
-  Future<void> _reload() async {
+  Future<void> _reload({bool keepIds = false}) async {
     final List<WindowInfo> windows;
     try {
       windows = await client.listWindows();
     } catch (e) {
-      return; // connection errors surface through ExitEvent / ssh.done
+      return; // connection errors surface through ExitEvent / done
     }
     if (!mounted || windows.isEmpty) return;
+    _loadCommands();
     final before = (_winId, _paneId);
     setState(() {
       _windows = windows;
       final active = windows.where((w) => w.active).firstOrNull ?? windows.first;
       final oldWin = _winId;
-      if (_winId == null || _window == null || _follow || _jumpToActive) _winId = active.id;
+      if (_winId == null || _window == null || (_follow && !keepIds) || _jumpToActive) _winId = active.id;
       _jumpToActive = false;
       final win = _window!;
       if (_winId != oldWin || _rect == null) _paneId = win.activePane;
@@ -249,6 +362,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       _panes.removeWhere((id, p) {
         if (alive.containsKey(id)) return false;
         p.focus.dispose();
+        p.scroll.dispose();
         return true;
       });
       for (final w in windows) {
@@ -267,6 +381,13 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if ((_winId, _paneId) != before) _keepZoomed();
   }
 
+  Future<void> _loadCommands() async {
+    try {
+      final c = await client.paneCommands();
+      if (mounted) setState(() => _commands = c);
+    } catch (_) {}
+  }
+
   /// Creates the pane's Terminal at its tmux size and seeds it with capture-pane + cursor.
   void _ensurePane(PaneRect r) {
     if (_panes.containsKey(r.id)) return;
@@ -276,21 +397,26 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     p.decoder = const Utf8Decoder(allowMalformed: true).startChunkedConversion(_FnSink(_writer(term)));
     term.onOutput = (data) => _onInput(r.id, data);
     _panes[r.id] = p;
-    () async {
-      try {
-        final screen = await client.capturePane(r.id);
-        p.state = 1;
-        final (x, y) = await client.cursor(r.id);
-        _writer(term)('$screen\x1b[${y + 1};${x + 1}H');
-      } catch (_) {
-        // pane may have vanished; go live anyway
-      }
-      p.state = 2;
-      for (final b in p.pending) {
-        p.decoder.add(b);
-      }
-      p.pending.clear();
-    }();
+    _seed(r.id, p);
+  }
+
+  /// capture-pane + cursor into the pane's terminal, then live output. [reset]: clear it first (RIS).
+  Future<void> _seed(int id, _Pane p, {bool reset = false}) async {
+    p.state = 0;
+    p.pending.clear();
+    try {
+      final screen = await client.capturePane(id);
+      p.state = 1;
+      final (x, y) = await client.cursor(id);
+      _writer(p.term)('${reset ? '\x1bc' : ''}$screen\x1b[${y + 1};${x + 1}H');
+    } catch (_) {
+      // pane may have vanished; go live anyway
+    }
+    p.state = 2;
+    for (final b in p.pending) {
+      p.decoder.add(b);
+    }
+    p.pending.clear();
   }
 
   /// Writes to a terminal; replies the terminal emulator generates while parsing
@@ -308,6 +434,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   void _onInput(int paneId, String data) {
     if (_writing) return;
+    _closeHistory();
     if (data.length == 1 && (_ctrl || _alt)) {
       var c = data.codeUnitAt(0);
       if (_ctrl) {
@@ -336,13 +463,36 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   void _text(String s) => _panes[_paneId]?.term.textInput(s);
 
   void _bytes(List<int> b) {
+    _closeHistory();
     if (_paneId != null) _run(client.sendBytes(_paneId!, b));
   }
 
   // then/onError, not catchError: helpers typed Future<void> are Future<List<String>> at runtime.
   void _run(Future<void> f) => f.then((_) {}, onError: (Object e) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+        if (mounted && !_reconnecting) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
       });
+
+  // ---------- tmux scrollback ----------
+
+  /// The live view only has what arrived since attach; older lines come from tmux's history.
+  Future<void> _openHistory() async {
+    final id = _paneId, r = _termRect;
+    if (id == null || r == null || _history?.$1 == id) return;
+    final String text;
+    try {
+      text = await client.captureHistory(id);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || id != _paneId) return;
+    final t = Terminal(maxLines: 5000)..resize(r.w, r.h);
+    t.write(text);
+    setState(() => _history = (id, t));
+  }
+
+  void _closeHistory() {
+    if (_history != null) setState(() => _history = null);
+  }
 
   // ---------- navigation ----------
 
@@ -350,6 +500,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (!mounted) return;
     final hadKeyboard = _panes[_paneId]?.focus.hasFocus ?? false;
     setState(() {
+      _history = null;
       _paneId = id;
       final r = _termRect;
       if (r != null) _ensurePane(r);
@@ -376,6 +527,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     final w = _windows.where((w) => w.id == id).firstOrNull;
     if (w == null) return;
     setState(() {
+      _history = null;
       _slideFrom = slideFrom;
       _winId = id;
       _paneId = w.activePane;
@@ -429,6 +581,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   void _down(PointerDownEvent e) {
     _ptrs[e.pointer] = e.position;
+    if (_ptrs.length == 1) _pull = 0;
+    _gesturePtrs = max(_gesturePtrs, _ptrs.length);
     if (_ptrs.length == 2) {
       _start = Map.of(_ptrs);
       _t0 = DateTime.now();
@@ -444,6 +598,18 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   void _moveP(PointerMoveEvent e) {
     if (!_ptrs.containsKey(e.pointer)) return;
     _ptrs[e.pointer] = e.position;
+    if (_gesturePtrs == 1) {
+      // One finger dragging down while the live view is at the top of its own scrollback (main screen;
+      // on the alt screen TerminalView turns drags into wheel/arrow keys for the app).
+      final p = _panes[_paneId];
+      final sc = p?.scroll;
+      if (p != null &&
+          sc != null &&
+          !p.term.isUsingAltBuffer &&
+          (!sc.hasClients || sc.position.pixels <= sc.position.minScrollExtent + 0.5)) {
+        _pull += e.delta.dy;
+      }
+    }
     final s = _start;
     if (s == null || _ptrs.length != 2 || !s.keys.every(_ptrs.containsKey)) return;
     _scale = _spread(_ptrs) / _spread(s);
@@ -479,6 +645,11 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       }
     }
     _ptrs.remove(e.pointer);
+    if (_ptrs.isEmpty) {
+      if (_gesturePtrs == 1 && _pull > 40) _openHistory();
+      _gesturePtrs = 0;
+      _pull = 0;
+    }
   }
 
   // ---------- sheets ----------
@@ -666,6 +837,11 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             onLongPress: _actions,
           ),
           IconButton(
+            tooltip: 'Overview',
+            icon: const Icon(Icons.grid_view),
+            onPressed: _openOverview,
+          ),
+          IconButton(
             tooltip: 'Keyboard',
             icon: const Icon(Icons.keyboard),
             onPressed: () {
@@ -704,6 +880,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                 child: TerminalView(
                   p.term,
                   focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
+                  scrollController: p.scroll,
                   autoResize: false,
                   deleteDetection: true,
                   textScaler: TextScaler.noScaling,
@@ -713,31 +890,98 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             ),
           ),
         );
+        final h = _history;
         return Listener(
           onPointerDown: _down,
           onPointerMove: _moveP,
           onPointerUp: _up,
           onPointerCancel: _up,
-          child: ClipRect(
-            child: AnimatedBuilder(
-              animation: _bump,
-              builder: (context, child) => Transform.translate(
-                offset: _bumpDir * 30 * sin(pi * _bump.value),
-                child: child,
+          child: Stack(fit: StackFit.expand, children: [
+            ClipRect(
+              child: AnimatedBuilder(
+                animation: _bump,
+                builder: (context, child) => Transform.translate(
+                  offset: _bumpDir * 30 * sin(pi * _bump.value),
+                  child: child,
+                ),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  transitionBuilder: (child, anim) {
+                    final incoming = child.key == ValueKey(_paneId);
+                    final tween = Tween(begin: incoming ? _slideFrom : -_slideFrom, end: Offset.zero);
+                    return SlideTransition(position: tween.animate(anim), child: child);
+                  },
+                  child: view,
+                ),
               ),
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 220),
-                transitionBuilder: (child, anim) {
-                  final incoming = child.key == ValueKey(_paneId);
-                  final tween = Tween(begin: incoming ? _slideFrom : -_slideFrom, end: Offset.zero);
-                  return SlideTransition(position: tween.animate(anim), child: child);
-                },
-                child: view,
+            ),
+            if (h != null && h.$1 == r.id) _historyView(h.$2, font),
+            ..._edgeHints(),
+            if (_reconnecting)
+              const Align(
+                alignment: Alignment.topCenter,
+                child: IgnorePointer(child: _Pill('Reconnecting…', progress: true)),
+              ),
+          ]),
+        );
+      });
+
+  /// Read-only tmux history over the live view, starting at the bottom (xterm sticks to the bottom).
+  Widget _historyView(Terminal t, double font) => Stack(children: [
+        Positioned.fill(
+          child: ColoredBox(
+            color: Colors.black,
+            child: MediaQuery.removePadding(
+              context: context,
+              removeTop: true,
+              removeBottom: true,
+              child: TerminalView(
+                t,
+                readOnly: true,
+                hardwareKeyboardOnly: true,
+                autoResize: false,
+                textScaler: TextScaler.noScaling,
+                textStyle: TerminalStyle(fontSize: font),
               ),
             ),
           ),
-        );
-      });
+        ),
+        Positioned(
+          right: 12,
+          bottom: 12,
+          child: ActionChip(
+            avatar: const Icon(Icons.arrow_downward, size: 16),
+            label: const Text('LIVE'),
+            onPressed: _closeHistory,
+          ),
+        ),
+      ]);
+
+  /// Pills on the edges that have a spatial neighbour, with its current command.
+  List<Widget> _edgeHints() {
+    final id = _paneId;
+    if (id == null) return const [];
+    return [
+      for (final (d, align) in const [
+        (Dir.left, Alignment.centerLeft),
+        (Dir.right, Alignment.centerRight),
+        (Dir.up, Alignment.topCenter),
+        (Dir.down, Alignment.bottomCenter),
+      ])
+        if (neighbor(_rects, id, d) case final n?)
+          Align(
+            alignment: align,
+            child: IgnorePointer(
+              child: _Pill(switch (d) {
+                Dir.left => '‹ ${_commands[n] ?? '%$n'}',
+                Dir.right => '${_commands[n] ?? '%$n'} ›',
+                Dir.up => '˄ ${_commands[n] ?? '%$n'}',
+                Dir.down => '˅ ${_commands[n] ?? '%$n'}',
+              }),
+            ),
+          ),
+    ];
+  }
 
   Widget _extraKeys() {
     Widget btn(String label, VoidCallback onTap, {bool on = false}) => InkWell(
@@ -771,4 +1015,25 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       ),
     );
   }
+}
+
+/// Slim translucent label over the terminal.
+class _Pill extends StatelessWidget {
+  final String text;
+  final bool progress;
+  const _Pill(this.text, {this.progress = false});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.all(4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (progress) ...[
+            const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
+            const SizedBox(width: 6),
+          ],
+          Text(text, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+        ]),
+      );
 }

@@ -66,7 +66,8 @@ class _HostsScreenState extends State<HostsScreen> {
       }
       await Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => PaneScreen(ssh: ssh, client: tmux, session: h.session)),
+        MaterialPageRoute(builder: (_) => PaneScreen(
+              ssh: ssh, client: tmux, session: h.session, reconnect: () => connectTmux(h))),
       );
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Connect failed: $e')));

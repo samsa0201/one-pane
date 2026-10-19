@@ -74,12 +74,16 @@ class WindowInfo  { final int id; final int index; final String name; final bool
 class TmuxClient {
   TmuxClient(Stream<List<int>> stdout, void Function(String data) write);  // client calls write('<cmd>\n')
   Stream<TmuxEvent> get events;                 // broadcast
+  Future<void> get done;                        // tmux stdout ended (detach / exit / drop); later cmds fail
   Future<List<String>> cmd(String command);     // throws TmuxError(lines) on %error
   // helpers (all built on cmd):
   Future<List<SessionInfo>> listSessions();
   Future<List<WindowInfo>> listWindows();      // windows of the attached session, sorted by index
   Future<void> sendBytes(int paneId, List<int> bytes);   // send-keys -H, chunk ≤ 256 bytes/command
   Future<String> capturePane(int paneId);       // capture-pane -p -e -J, lines joined with \r\n
+  Future<String> captureHistory(int paneId, {int lines = 2000}); // capture-pane -p -e -J -S -<lines> -E -1
+                                                // (history above the screen; no history → first screen line)
+  Future<Map<int, String>> paneCommands();      // list-panes -s: pane id → #{pane_current_command}
   Future<(int, int)> cursor(int paneId);        // (x, y)
   Future<void> selectPane(int paneId, {bool keepZoom = false}); // select-pane [-Z] -t %N
   Future<void> selectWindow(int windowId);      // select-window -t @N
@@ -103,7 +107,9 @@ like a shell.
 class HostConfig { String id, name, host; int port; String user; String? password; String? privateKeyPem;
                    String tmuxCmd /* default 'tmux' */; String session /* default 'main' */; toJson/fromJson }
 Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h);  // dartssh2 execute(), wires stdout/stdin
-// PaneScreen({SSHClient? ssh, required TmuxClient client, required String session}) — ssh null in widget tests.
+// PaneScreen({SSHClient? ssh, required TmuxClient client, required String session,
+//             Future<(SSHClient?, TmuxClient)> Function()? reconnect}) — ssh null in widget tests;
+//             HostsScreen passes reconnect: () => connectTmux(h). reconnect null: a drop closes the screen.
 ```
 Secrets (password, key) live in flutter_secure_storage; the rest of HostConfig in shared_preferences.
 
@@ -121,7 +127,22 @@ Pane screen:
 - Phone mode: terminal at font 13 (pinch 8–24), tmux sized to fit, shown pane zoomed. Desk mode: exactly
   the pane's cols×rows, font scaled to width. Keyboard hidden on open (tap terminal / keyboard button).
 - Top bar: `session › window-index:name` + a mini-map of the window's panes (rectangles at relative
-  positions, current one filled). Tap the bar → session/window sheet.
+  positions, current one filled) + overview button (grid icon, same as pinch-in) + keyboard button.
+  Tap the bar → session/window sheet.
+- Neighbour edge hints: on each edge of the terminal area with a spatial neighbour, a translucent pill
+  with its command (`‹ vim`, `git ›`, `˄ htop`, `˅ bash`), touch-transparent. Commands come from
+  `paneCommands()`, reloaded with every window reload and every 3 s while the screen is visible.
+- Scrollback: one-finger drag scrolls the live view's own buffer (xterm TerminalView; only what arrived
+  since attach). Dragging down further at its top (main screen only; on the alt screen TerminalView
+  sends wheel/arrow keys to the app) opens a read-only overlay with `captureHistory()` (own xterm
+  Terminal, pane width, starts at the bottom). "LIVE" chip, any key, or changing pane closes it.
+- Auto-reconnect: when the connection drops (tmux stdout ends, ssh done, %exit not caused by our
+  close(), or a failed probe on app resume) a "Reconnecting…" pill shows and `reconnect` is retried
+  with backoff 1, 2, 4, 8, 15 s… for ~2 min; then the same window/pane are kept if they still exist,
+  panes are reseeded and the phone-mode size / zoom re-sent. A killed session is not reconnected
+  (that would recreate it via `new-session -A`): tmux 3.6 sends a bare `%exit` for both detach and kill,
+  but a kill is preceded by `%sessions-changed`, so that pair (or a reason mentioning session/server
+  exited) pops the screen with a message.
 - Two-finger swipe left/right/up/down → move to the spatial neighbour (`neighbor()`), with a slide
   transition from that side. No neighbour → small rubber-band bump + haptic. Also selects the pane in
   tmux (`selectPane`) so the desktop follows.

@@ -144,6 +144,20 @@ void main() {
       expect(w.last, '$want\n');
     }
 
+    final pc = c.paneCommands();
+    reply(['%0 fish', '%3 vim', '%12 my cmd']);
+    expect(await pc, {0: 'fish', 3: 'vim', 12: 'my cmd'});
+    expect(w.last, "list-panes -s -F '#{pane_id} #{pane_current_command}'\n");
+
+    final ch = c.captureHistory(3, lines: 500);
+    reply(['old1', '\x1b[32mold2', '']);
+    expect(await ch, 'old1\r\n\x1b[32mold2');
+    expect(w.last, 'capture-pane -p -e -J -S -500 -E -1 -t %3\n');
+    final ch2 = c.captureHistory(3);
+    reply([]);
+    expect(await ch2, '');
+    expect(w.last, 'capture-pane -p -e -J -S -2000 -E -1 -t %3\n');
+
     final ns = c.newSession("it's");
     reply([]);
     await Future<void>.delayed(Duration.zero); // switch-client is sent after new-session replies
@@ -157,5 +171,17 @@ void main() {
     await c.close();
     expect(w.last, 'detach-client\n');
     await pending;
+  });
+
+  test('done completes when tmux stdout ends; later commands fail at once', () async {
+    final (c, ctl, _) = mk();
+    var done = false;
+    c.done.then((_) => done = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(done, false);
+    await ctl.close();
+    await Future<void>.delayed(Duration.zero);
+    expect(done, true);
+    await expectLater(c.cmd('list-panes'), throwsA(isA<TmuxError>()));
   });
 }

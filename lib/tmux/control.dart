@@ -110,13 +110,23 @@ class TmuxClient {
   List<String>? _block; // lines of the open %begin block
   bool _blockIsOurs = false;
   bool _closed = false;
+  final _done = Completer<void>();
 
   /// [write] receives `<command>\n` strings for tmux's stdin.
   TmuxClient(Stream<List<int>> stdout, void Function(String data) write) : _write = write {
-    stdout.listen(_onData, onDone: _failPending, onError: (_) => _failPending());
+    stdout.listen(_onData, onDone: _end, onError: (_) => _end());
   }
 
   Stream<TmuxEvent> get events => _events.stream;
+
+  /// Completes when tmux's stdout ends (detach, tmux exit, connection drop).
+  Future<void> get done => _done.future;
+
+  void _end() {
+    _closed = true; // nothing will answer anymore
+    _failPending();
+    if (!_done.isCompleted) _done.complete();
+  }
 
   Future<List<String>> cmd(String command) {
     if (_closed) return Future.error(TmuxError(['closed']));
@@ -234,12 +244,26 @@ class TmuxClient {
   }
 
   /// Visible screen with escapes, lines joined with \r\n (trailing empty lines dropped).
-  Future<String> capturePane(int paneId) async {
-    final lines = await cmd('capture-pane -p -e -J -t %$paneId');
+  Future<String> capturePane(int paneId) async => _joined(await cmd('capture-pane -p -e -J -t %$paneId'));
+
+  /// Up to [lines] history lines above the visible screen, same format as [capturePane].
+  Future<String> captureHistory(int paneId, {int lines = 2000}) async =>
+      _joined(await cmd('capture-pane -p -e -J -S -$lines -E -1 -t %$paneId'));
+
+  static String _joined(List<String> lines) {
     while (lines.isNotEmpty && lines.last.isEmpty) {
       lines.removeLast();
     }
     return lines.join('\r\n');
+  }
+
+  /// pane id → #{pane_current_command} for every pane of the attached session.
+  Future<Map<int, String>> paneCommands() async {
+    final lines = await cmd("list-panes -s -F '#{pane_id} #{pane_current_command}'");
+    return {
+      for (final l in lines)
+        if (l.split(' ') case [final id, ...final c]) _id(id): c.join(' '),
+    };
   }
 
   Future<(int, int)> cursor(int paneId) async {
