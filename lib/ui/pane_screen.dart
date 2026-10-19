@@ -185,11 +185,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   }
 
   /// Best effort: give the desktop its layout back.
-  void _unzoomOurs() {
-    for (final w in _zoomedByUs) {
-      client.unzoom(w).then((_) {}, onError: (_) {});
-    }
+  Future<void> _unzoomOurs() async {
+    final done = [for (final w in _zoomedByUs) client.unzoom(w).then((_) {}, onError: (_) {})];
     _zoomedByUs.clear();
+    await Future.wait(done);
   }
 
   @override
@@ -205,10 +204,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       p.focus.dispose();
       p.scroll.dispose();
     }
-    if (!_exited) _unzoomOurs(); // queued before detach-client, tmux runs them in order
+    // Closing SSH right after writing the unzoom commands dropped them; wait for tmux's replies first.
+    final unzoomed = _exited ? Future<void>.value() : _unzoomOurs().timeout(const Duration(seconds: 2), onTimeout: () {});
     _exited = true;
-    client.close().catchError((_) {});
-    _ssh?.close();
+    final (c, ssh) = (client, _ssh);
+    unzoomed.whenComplete(() {
+      c.close().catchError((_) {});
+      ssh?.close();
+    });
     super.dispose();
   }
 

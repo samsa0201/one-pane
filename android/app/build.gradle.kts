@@ -34,6 +34,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // R8 breaks shared_preferences' JNI bridge (NoSuchMethodError ...SharedPreferencesApiRegistrar.getAll,
+            // release only): hosts were never saved. Size cost is small for a sideloaded app.
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }
