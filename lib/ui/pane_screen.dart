@@ -634,15 +634,21 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     );
   }
 
+  double _barDx = 0;
+
   Widget _topBar() {
     final w = _window;
     final title = w == null ? _session : '$_session › ${w.index}:${w.name}${w.zoomed ? '  [Z]' : ''}';
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: _sheet,
+      // Distance OR velocity: a slow drag that stops before lifting has ~0 velocity.
+      onHorizontalDragStart: (_) => _barDx = 0,
+      onHorizontalDragUpdate: (d) => _barDx += d.delta.dx,
       onHorizontalDragEnd: (d) {
         final v = d.primaryVelocity ?? 0;
-        if (v.abs() > 200) _stepWindow(v < 0 ? 1 : -1);
+        final dx = v.abs() > 200 ? v : _barDx;
+        if (dx.abs() > 200 || _barDx.abs() > 60) _stepWindow(dx < 0 ? 1 : -1);
       },
       child: Container(
         height: 48,

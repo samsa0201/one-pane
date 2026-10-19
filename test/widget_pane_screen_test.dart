@@ -11,12 +11,15 @@ import 'package:tmux_pocket/ui/pane_screen.dart';
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
 
 /// Fake tmux: every command gets `%begin` / scripted lines / `%end`.
-(TmuxClient, List<String>) fakeTmux() {
+(TmuxClient, List<String>) fakeTmux({bool twoWindows = false}) {
   final out = StreamController<List<int>>();
   final cmds = <String>[];
   var n = 0;
   List<String> replyFor(String c) => switch (c) {
-        _ when c.startsWith('list-windows') => ['@1 0 1 0 %0 $layout $layout main'],
+        _ when c.startsWith('list-windows') => [
+            '@1 0 1 0 %0 $layout $layout main',
+            if (twoWindows) '@2 1 0 0 %5 b25f,160x48,0,0,5 b25f,160x48,0,0,5 logs',
+          ],
         _ when c.startsWith('list-sessions') => [r'$0 1 1 main'],
         _ when c.startsWith('capture-pane') => ['hello'],
         _ when c.startsWith('display') => ['0 0'],
@@ -32,12 +35,12 @@ const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,
   return (client, cmds);
 }
 
-Future<List<String>> pumpScreen(WidgetTester tester) async {
+Future<List<String>> pumpScreen(WidgetTester tester, {bool twoWindows = false}) async {
   SharedPreferences.setMockInitialValues({});
   tester.view.physicalSize = const Size(1080, 2400);
   tester.view.devicePixelRatio = 2.75;
   addTearDown(tester.view.reset);
-  final (client, cmds) = fakeTmux();
+  final (client, cmds) = fakeTmux(twoWindows: twoWindows);
   await tester.pumpWidget(MaterialApp(home: PaneScreen(client: client, session: 'main')));
   await tester.pump(const Duration(milliseconds: 50));
   await tester.pump(const Duration(milliseconds: 200)); // size debounce
@@ -95,5 +98,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(cmds, contains('refresh-client -f ignore-size'));
     expect(cmds.where((c) => c.startsWith('refresh-client -C') || c.startsWith('if ')), isEmpty);
+  });
+
+  testWidgets('fling the top bar left goes to the next window', (tester) async {
+    final cmds = await pumpScreen(tester, twoWindows: true);
+    await tester.fling(find.textContaining('0:main'), const Offset(-200, 0), 1000);
+    await tester.pumpAndSettle();
+    expect(cmds, contains('select-window -t @2'));
   });
 }
