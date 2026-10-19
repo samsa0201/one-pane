@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../tmux/layout.dart';
@@ -29,6 +30,10 @@ class MiniMap extends StatelessWidget {
   final Size size;
   final ValueChanged<int>? onTapPane;
   final VoidCallback? onLongPress;
+  final GestureDragStartCallback? onPanStart;
+  final GestureDragUpdateCallback? onPanUpdate;
+  final GestureDragEndCallback? onPanEnd;
+  final GestureDragCancelCallback? onPanCancel;
 
   const MiniMap({
     super.key,
@@ -37,11 +42,15 @@ class MiniMap extends StatelessWidget {
     this.size = const Size(64, 40),
     this.onTapPane,
     this.onLongPress,
+    this.onPanStart,
+    this.onPanUpdate,
+    this.onPanEnd,
+    this.onPanCancel,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    final detector = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapUp: onTapPane == null
           ? null
@@ -52,6 +61,22 @@ class MiniMap extends StatelessWidget {
       onLongPress: onLongPress,
       child: CustomPaint(size: size, painter: MiniMapPainter(panes, currentId)),
     );
+    if (onPanUpdate == null) return detector;
+    // A pan accepts after 2× touch slop, a parent's horizontal drag after 1×: halve ours so both accept
+    // at the same distance, and ours wins (the pointer reaches the deepest recognizer first).
+    final slop = (MediaQuery.maybeGestureSettingsOf(context)?.touchSlop ?? kTouchSlop) / 2;
+    return RawGestureDetector(gestures: {
+      PanGestureRecognizer: GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
+        () => PanGestureRecognizer(debugOwner: this),
+        (r) => r
+          ..gestureSettings = DeviceGestureSettings(touchSlop: slop)
+          ..dragStartBehavior = DragStartBehavior.down // the slop's movement counts too
+          ..onStart = onPanStart
+          ..onUpdate = onPanUpdate
+          ..onEnd = onPanEnd
+          ..onCancel = onPanCancel,
+      ),
+    }, child: detector);
   }
 }
 

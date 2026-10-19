@@ -36,12 +36,17 @@ Keystore-backed secure storage. Host key: trusted on first use, a changed key is
 | top bar | tap | sessions & windows sheet (switch, new, follow, phone mode) |
 | minimap | tap a pane | jump to it |
 | minimap | long-press | split ↔ / ↕, zoom, new window, kill pane |
-| overview | tap a pane / pinch in | enter that pane / session map of all windows |
+| minimap | drag (any direction) | scrub: the layout opens large with each pane's command, the finger moves a pointer over it (×3); release on a pane → jump there |
+| overview | tap a pane / pinch in or **Sessions** button | enter that pane / session map of all windows |
 
 Swipes follow the "move the content" convention: fingers moving left bring in the pane on the right.
 Android reserves the screen edges for the back gesture, so nothing here uses edge swipes.
 
-Extra keys row: Esc Tab Ctrl Alt (sticky) ^C arrows Prefix (C-b) | ~ / -.
+Neighbour hints on the terminal edges fade to faint 2 s after the pane changes; touching the terminal
+brings them back.
+
+Extra keys row: Esc Tab Ctrl Alt (sticky) ^C arrows Prefix (C-b) Paste | ~ / -. Paste sends the
+clipboard (newlines as Enter), as a bracketed paste when the program asked for it.
 
 ## Develop
 - `env -u TMUX flutter test` (unit + widget + a live test against a real tmux on `-L pocket-test`).

@@ -67,17 +67,21 @@ class WindowOverview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Future<void> sessions() async {
+      final r = await Navigator.push<OverviewResult>(
+        context,
+        MaterialPageRoute(builder: (_) => SessionMap(client: client, session: session)),
+      );
+      if (r != null && context.mounted) Navigator.pop(context, r);
+    }
+
     return Scaffold(
-      appBar: AppBar(title: Text('$session › ${window.index}:${window.name}')),
+      appBar: AppBar(title: Text('$session › ${window.index}:${window.name}'), actions: [
+        IconButton(tooltip: 'Sessions', icon: const Icon(Icons.view_module), onPressed: sessions),
+      ]),
       body: _Pinch(
         onPinchOut: () => Navigator.pop(context),
-        onPinchIn: () async {
-          final r = await Navigator.push<OverviewResult>(
-            context,
-            MaterialPageRoute(builder: (_) => SessionMap(client: client, session: session)),
-          );
-          if (r != null && context.mounted) Navigator.pop(context, r);
-        },
+        onPinchIn: sessions,
         child: Padding(
           padding: const EdgeInsets.all(8),
           child: LayoutBuilder(builder: (context, c) {

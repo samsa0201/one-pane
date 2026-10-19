@@ -82,6 +82,12 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   int _gesturePtrs = 0; // max fingers down in this gesture
   bool _reconnecting = false;
   TmuxEvent? _lastEvent; // ignoring output; %sessions-changed right before %exit = session killed
+  bool _hintsLit = true; // edge hints at full opacity (else dimmed)
+  Timer? _hintTimer;
+
+  // minimap scrub: a virtual pointer over the window layout drawn large
+  int? _scrubFrom, _scrubAt; // pane shown when the scrub started / pane under the virtual pointer
+  Offset _scrubPos = Offset.zero;
 
   // Phone mode (default): tmux sizes the window to our cols×rows at font [_font] and the shown pane is
   // kept zoomed. Desk mode: ignore-size, real pane size, font = fit-to-width × [_zoom] (≥ 1).
@@ -193,6 +199,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _reloadTimer?.cancel();
     _cmdTimer?.cancel();
     _sizeTimer?.cancel();
+    _hintTimer?.cancel();
     _bump.dispose();
     for (final p in _panes.values) {
       p.focus.dispose();
@@ -378,7 +385,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         _ensurePane(win.sizeOf(p.id)!);
       }
     });
-    if ((_winId, _paneId) != before) _keepZoomed();
+    if ((_winId, _paneId) != before) {
+      _keepZoomed();
+      _wakeHints();
+    }
   }
 
   Future<void> _loadCommands() async {
@@ -462,6 +472,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   void _text(String s) => _panes[_paneId]?.term.textInput(s);
 
+  /// Clipboard text into the pane, newlines as Enter; bracketed if the program enabled it (xterm decides).
+  Future<void> _paste() async {
+    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    final t = _panes[_paneId]?.term;
+    if (text == null || text.isEmpty || t == null) return;
+    // an embedded end marker would let the pasted rest run as typed input
+    t.paste(text.replaceAll('\x1b[201~', '').replaceAll('\r\n', '\r').replaceAll('\n', '\r'));
+  }
+
   void _bytes(List<int> b) {
     _closeHistory();
     if (_paneId != null) _run(client.sendBytes(_paneId!, b));
@@ -508,6 +527,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (hadKeyboard) WidgetsBinding.instance.addPostFrameCallback((_) => _panes[id]?.focus.requestFocus());
     if (select) _run(client.selectPane(id, keepZoom: _phone));
     _keepZoomed();
+    _wakeHints();
   }
 
   void _move(Dir d) {
@@ -537,6 +557,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     });
     _run(client.selectWindow(id));
     _keepZoomed();
+    _wakeHints();
   }
 
   void _stepWindow(int delta) {
@@ -571,6 +592,87 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (r.session != null) _run(client.switchSession(r.session!));
   }
 
+  /// Edge hints at full opacity for 2 s, then dimmed: the top one covers the first terminal row.
+  void _wakeHints() {
+    _hintTimer?.cancel();
+    _hintTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _hintsLit = false);
+    });
+    if (!_hintsLit) setState(() => _hintsLit = true);
+  }
+
+  // ---------- minimap scrub ----------
+
+  /// The scrub overlay's layout size: the window's aspect, fit into most of the screen.
+  Size get _scrubSize {
+    final s = MediaQuery.sizeOf(context);
+    final r = scaleRects(_rects, Size(s.width - 48, s.height / 2)).values;
+    return Size(r.map((e) => e.right).fold(0.0, max), r.map((e) => e.bottom).fold(0.0, max));
+  }
+
+  void _scrubStart(DragStartDetails _) {
+    final id = _paneId;
+    final r = id == null ? null : scaleRects(_rects, _scrubSize)[id];
+    if (r == null) return;
+    setState(() {
+      _scrubFrom = _scrubAt = id;
+      _scrubPos = r.center;
+    });
+  }
+
+  /// Finger movement ×3 moves the virtual pointer, so a thumb's reach covers the map.
+  void _scrubUpdate(DragUpdateDetails d) {
+    if (_scrubFrom == null) return;
+    final size = _scrubSize, p = _scrubPos + d.delta * 3;
+    _scrubPos = Offset(p.dx.clamp(0, size.width - 0.5), p.dy.clamp(0, size.height - 0.5));
+    final id = paneAt(_rects, size, _scrubPos);
+    if (id != null && id != _scrubAt) {
+      HapticFeedback.selectionClick();
+      setState(() => _scrubAt = id);
+    }
+  }
+
+  void _scrubEnd(DragEndDetails _) {
+    final from = _scrubFrom, to = _scrubAt;
+    _scrubCancel();
+    if (to == null || to == from || !_rects.any((p) => p.id == to)) return;
+    _slideFrom = Offset.zero;
+    _showPane(to, select: true);
+  }
+
+  void _scrubCancel() {
+    if (_scrubFrom != null) setState(() => _scrubFrom = _scrubAt = null);
+  }
+
+  Widget _scrubOverlay() {
+    final size = _scrubSize;
+    return IgnorePointer(
+      child: ColoredBox(
+        color: Colors.black54,
+        child: Center(
+          child: SizedBox.fromSize(
+            size: size,
+            child: Stack(children: [
+              CustomPaint(size: size, painter: MiniMapPainter(_rects, _scrubAt)),
+              for (final e in scaleRects(_rects, size).entries)
+                Positioned.fromRect(
+                  rect: e.value,
+                  child: Center(
+                    child: Text(
+                      _commands[e.key] ?? '%${e.key}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 16, color: e.key == _scrubAt ? Colors.black : Colors.white),
+                    ),
+                  ),
+                ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
   // ---------- two-finger gestures ----------
 
   Offset _focal(Map<int, Offset> m) => m.values.reduce((a, b) => a + b) / m.length.toDouble();
@@ -580,6 +682,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   }
 
   void _down(PointerDownEvent e) {
+    _wakeHints();
     _ptrs[e.pointer] = e.position;
     if (_ptrs.length == 1) _pull = 0;
     _gesturePtrs = max(_gesturePtrs, _ptrs.length);
@@ -796,10 +899,13 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(children: [
-          _topBar(),
-          Expanded(child: _terminalArea(kb)),
-          _extraKeys(),
+        child: Stack(fit: StackFit.expand, children: [
+          Column(children: [
+            _topBar(),
+            Expanded(child: _terminalArea(kb)),
+            _extraKeys(),
+          ]),
+          if (_scrubFrom != null) _scrubOverlay(),
         ]),
       ),
     );
@@ -835,6 +941,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
               _showPane(id, select: true);
             },
             onLongPress: _actions,
+            onPanStart: _scrubStart,
+            onPanUpdate: _scrubUpdate,
+            onPanEnd: _scrubEnd,
+            onPanCancel: _scrubCancel,
           ),
           IconButton(
             tooltip: 'Overview',
@@ -972,12 +1082,16 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           Align(
             alignment: align,
             child: IgnorePointer(
-              child: _Pill(switch (d) {
-                Dir.left => '‹ ${_commands[n] ?? '%$n'}',
-                Dir.right => '${_commands[n] ?? '%$n'} ›',
-                Dir.up => '˄ ${_commands[n] ?? '%$n'}',
-                Dir.down => '˅ ${_commands[n] ?? '%$n'}',
-              }),
+              child: AnimatedOpacity(
+                opacity: _hintsLit ? 1 : 0.15,
+                duration: const Duration(milliseconds: 400),
+                child: _Pill(switch (d) {
+                  Dir.left => '‹ ${_commands[n] ?? '%$n'}',
+                  Dir.right => '${_commands[n] ?? '%$n'} ›',
+                  Dir.up => '˄ ${_commands[n] ?? '%$n'}',
+                  Dir.down => '˅ ${_commands[n] ?? '%$n'}',
+                }),
+              ),
             ),
           ),
     ];
@@ -1010,6 +1124,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           btn('↑', () => _key(TerminalKey.arrowUp)),
           btn('→', () => _key(TerminalKey.arrowRight)),
           btn('Prefix', () => _bytes(const [0x02])),
+          btn('Paste', _paste),
           for (final s in const ['|', '~', '/', '-']) btn(s, () => _text(s)),
         ]),
       ),

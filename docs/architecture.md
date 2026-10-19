@@ -132,6 +132,8 @@ Pane screen:
 - Neighbour edge hints: on each edge of the terminal area with a spatial neighbour, a translucent pill
   with its command (`‹ vim`, `git ›`, `˄ htop`, `˅ bash`), touch-transparent. Commands come from
   `paneCommands()`, reloaded with every window reload and every 3 s while the screen is visible.
+  Full opacity for 2 s after the shown pane changes or any pointer down on the terminal, then fade to
+  0.15 (the top hint covers the first terminal row; not 0, so they stay discoverable).
 - Scrollback: one-finger drag scrolls the live view's own buffer (xterm TerminalView; only what arrived
   since attach). Dragging down further at its top (main screen only; on the alt screen TerminalView
   sends wheel/arrow keys to the app) opens a read-only overlay with `captureHistory()` (own xterm
@@ -149,8 +151,18 @@ Pane screen:
 - Swipe on the top bar left/right → previous/next window.
 - Two-finger double tap → toggle tmux zoom on the pane.
 - Long-press mini-map → pane actions: split ↔ / ↕, kill, zoom, new window.
-- Bottom extra-keys row (horizontally scrollable): Esc Tab Ctrl Alt ^C ← ↓ ↑ → Prefix | ~ / -
-  (^C sends 0x03, Prefix sends C-b).
+- Mini-map scrub: a pan starting on the mini-map shows the window layout large and centred (same
+  `scaleRects` / `MiniMapPainter`), each pane labelled with its command. A virtual pointer starts at
+  the shown pane's centre and moves 3× the finger; the pane under it is highlighted, with a selection
+  haptic on each change. Release → that pane (as a mini-map tap, `select-pane -Z` in phone mode);
+  release on the start pane or cancel → nothing. The pan recognizer uses half the touch slop (pan slop
+  is 2× touch slop) so it accepts at the same distance as the top bar's horizontal drag and wins,
+  being deeper in the hit test.
+- Overview app bar: "Sessions" button (view_module) = pinch in → session map.
+- Bottom extra-keys row (horizontally scrollable): Esc Tab Ctrl Alt ^C ← ↓ ↑ → Prefix Paste | ~ / -
+  (^C sends 0x03, Prefix sends C-b, Paste sends the clipboard with \n → \r through xterm's
+  `Terminal.paste`, which wraps it in `\e[200~`…`\e[201~` when the pane enabled bracketed paste;
+  embedded `\e[201~` is stripped).
 - Android edge swipes are reserved by the system back gesture → no edge-swipe gestures.
 - If the active pane in tmux changes from the desktop, the phone follows only when "follow" is on
   (toggle in the sheet; default on).

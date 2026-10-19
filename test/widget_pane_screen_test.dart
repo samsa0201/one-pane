@@ -3,9 +3,11 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tmux_pocket/tmux/control.dart';
+import 'package:tmux_pocket/ui/minimap.dart';
 import 'package:tmux_pocket/ui/pane_screen.dart';
 import 'package:xterm/xterm.dart';
 
@@ -21,7 +23,7 @@ const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,
             '@1 0 1 0 %0 $layout $layout main',
             if (twoWindows) '@2 1 0 0 %5 b25f,160x48,0,0,5 b25f,160x48,0,0,5 logs',
           ],
-        _ when c.startsWith('list-sessions') => [r'$0 1 1 main'],
+        _ when c.startsWith('list-sessions') => [r'$0 1 1 main', r'$1 0 2 work'],
         _ when c.startsWith('list-panes') => ['%0 fish', '%1 vim', '%2 htop', '%5 tail'],
         _ when c.startsWith('capture-pane') && c.contains(' -S ') => ['old line 1', 'old line 2'],
         _ when c.startsWith('capture-pane') => ['hello'],
@@ -192,5 +194,68 @@ void main() {
     expect(find.text('Reconnecting…'), findsNothing);
     expect(calls, 0);
     expect(find.text('Session ended'), findsOneWidget);
+  });
+
+  testWidgets('edge hints dim after 2 s and light up on touch', (tester) async {
+    await pumpScreen(tester);
+    double opacity() => tester
+        .widget<AnimatedOpacity>(find.ancestor(of: find.text('vim ›'), matching: find.byType(AnimatedOpacity)))
+        .opacity;
+    expect(opacity(), 1);
+    await tester.pump(const Duration(seconds: 2));
+    expect(opacity(), 0.15);
+    final g = await tester.startGesture(const Offset(150, 400));
+    await tester.pump();
+    expect(opacity(), 1);
+    await g.up();
+    await tester.pump(const Duration(seconds: 2));
+    expect(opacity(), 0.15);
+  });
+
+  testWidgets('dragging from the minimap scrubs to a pane, not the window', (tester) async {
+    final cmds = await pumpScreen(tester, twoWindows: true);
+    final map = tester.getRect(find.byType(MiniMap));
+    final g = await tester.startGesture(map.centerLeft + const Offset(8, 0)); // on %0
+    for (var i = 0; i < 20; i++) {
+      await g.moveBy(const Offset(2, 1.5)); // toward the bottom-right
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(find.text('htop'), findsOneWidget); // overlay labels
+    expect(find.text('fish'), findsOneWidget);
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(find.text('htop'), findsNothing);
+    expect(cmds, contains('select-pane -Z -t %2'));
+    expect(cmds, isNot(contains(startsWith('select-window'))));
+  });
+
+  testWidgets('overview Sessions button opens the session map', (tester) async {
+    await pumpScreen(tester);
+    await tester.tap(find.byIcon(Icons.grid_view));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.view_module));
+    await tester.pumpAndSettle();
+    expect(find.text('Sessions'), findsOneWidget);
+    expect(find.text('work'), findsOneWidget);
+    expect(find.text('main · 3 panes'), findsOneWidget);
+  });
+
+  testWidgets('Paste sends the clipboard, bracketed when the pane enabled it', (tester) async {
+    final cmds = await pumpScreen(tester);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.getData') return {'text': 'a\nb'};
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+    await tester.ensureVisible(find.text('Paste'));
+    await tester.tap(find.text('Paste'));
+    await tester.pump();
+    expect(cmds, contains('send-keys -t %0 -H 61 0d 62'));
+
+    _out.add(utf8.encode('%output %0 \\033[?2004h\n'));
+    await tester.pump();
+    await tester.tap(find.text('Paste'));
+    await tester.pump();
+    expect(cmds, contains('send-keys -t %0 -H 1b 5b 32 30 30 7e 61 0d 62 1b 5b 32 30 31 7e'));
   });
 }
