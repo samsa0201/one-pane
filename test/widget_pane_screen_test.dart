@@ -238,7 +238,7 @@ void main() {
 
   testWidgets('overview button opens the overview, picking a pane keeps the zoom', (tester) async {
     final cmds = await pumpScreen(tester);
-    await tester.tap(find.byIcon(Icons.grid_view));
+    await tester.tap(find.byTooltip('Overview'));
     await tester.pumpAndSettle();
     for (final id in ['%0', '%1', '%2']) {
       expect(find.text(id), findsOneWidget);
@@ -361,7 +361,7 @@ void main() {
 
   testWidgets('overview Sessions button opens the session map', (tester) async {
     await pumpScreen(tester);
-    await tester.tap(find.byIcon(Icons.grid_view));
+    await tester.tap(find.byTooltip('Overview'));
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.view_module));
     await tester.pumpAndSettle();
@@ -377,7 +377,8 @@ void main() {
       return null;
     });
     addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
-    await tester.ensureVisible(find.text('Paste'));
+    await tester.tap(find.text('⋯')); // second page of keys
+    await tester.pump();
     await tester.tap(find.text('Paste'));
     await tester.pump();
     expect(cmds, contains('send-keys -t %0 -H 61 0d 62'));

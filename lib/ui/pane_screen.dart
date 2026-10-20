@@ -1040,10 +1040,13 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             future: client.listSessions(),
             builder: (ctx, snap) => ListView(shrinkWrap: true, children: [
               const _Header('Sessions'),
+              _Group(children: [
               // Each session opens to its windows; the current one starts open.
               for (final s in snap.data ?? const <SessionInfo>[])
                 ExpansionTile(
                   key: PageStorageKey('session ${s.name}'),
+                  shape: const Border(),
+                  collapsedShape: const Border(),
                   initiallyExpanded: s.name == _session,
                   leading: Icon(Icons.dns, color: s.name == _session ? accent : null),
                   title: Text(s.name, style: TextStyle(color: s.name == _session ? accent : null)),
@@ -1103,7 +1106,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   if (name != null && name.isNotEmpty) _run(client.newSession(name));
                 },
               ),
-              const Divider(),
+              ]),
+              const _Header('Settings'),
+              _Group(children: [
               SwitchListTile(
                 title: const Text('Follow active pane'),
                 subtitle: const Text('Jump when the pane changes from another client'),
@@ -1152,6 +1157,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   setSheet(() {});
                 },
               ),
+              ]),
+              const SizedBox(height: 8),
             ]),
           ),
         ),
@@ -1169,6 +1176,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         builder: (ctx, setSheet) => SafeArea(
           child: ListView(shrinkWrap: true, children: [
             const _Header('Terminal font'),
+            _Group(children: [
             for (final f in termFonts)
               FutureBuilder<bool>(
                 future: fontReady(f),
@@ -1205,6 +1213,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                         },
                 ),
               ),
+            ]),
+            const SizedBox(height: 8),
           ]),
         ),
       ),
@@ -1238,7 +1248,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     showGlassSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: Wrap(children: [
+        child: Padding(padding: const EdgeInsets.only(top: 6, bottom: 10), child: _Group(children: [
           ListTile(
               leading: const Icon(Icons.vertical_split),
               title: const Text('Split ↔ (side by side)'),
@@ -1259,7 +1269,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
               leading: const Icon(Icons.close, color: Colors.redAccent),
               title: Text('Kill pane %$id'),
               onTap: () => act(ctx, () => client.killPane(id))),
-        ]),
+        ])),
       ),
     );
   }
@@ -1276,9 +1286,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             Expanded(child: _terminalArea()),
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+              // Concentric: dock radius 28, inner padding 8 → keys and buttons radius 20 at the corners.
               child: Glass(
-                radius: const BorderRadius.all(Radius.circular(26)),
-                child: Column(mainAxisSize: MainAxisSize.min, children: [_topBar(), _extraKeys()]),
+                radius: const BorderRadius.all(Radius.circular(28)),
+                padding: const EdgeInsets.all(8),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  _topBar(),
+                  const SizedBox(height: 8),
+                  _extraKeys(),
+                ]),
               ),
             ),
           ]),
@@ -1303,10 +1319,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         final dx = v.abs() > 200 ? v : _barDx;
         if (dx.abs() > 200 || _barDx.abs() > 60) _stepWindow(dx < 0 ? 1 : -1);
       },
-      child: Container(
-        height: 52,
-        padding: const EdgeInsets.only(left: 12, right: 4),
+      child: SizedBox(
+        height: 48,
         child: Row(children: [
+          const SizedBox(width: 8),
           Expanded(
             child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -1354,7 +1370,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           MiniMap(
             panes: _rects,
             currentId: _paneId,
-            size: const Size(40, 44), // phone-shaped
+            size: const Size(36, 44), // phone-shaped
             onTapPane: (id) {
               _slideFrom = Offset.zero;
               _showPane(id, select: true);
@@ -1365,17 +1381,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             onPanEnd: _scrubEnd,
             onPanCancel: _scrubCancel,
           ),
-          IconButton(
-            tooltip: 'Overview',
-            icon: const Icon(Icons.grid_view, size: 22),
-            visualDensity: VisualDensity.compact,
-            onPressed: _openOverview,
-          ),
-          IconButton(
+          const SizedBox(width: 8),
+          _DockKey(tooltip: 'Overview', icon: Icons.grid_view_rounded, onTap: _openOverview),
+          const SizedBox(width: 6),
+          _DockKey(
             tooltip: 'Keyboard',
-            icon: const Icon(Icons.keyboard, size: 22),
-            visualDensity: VisualDensity.compact,
-            onPressed: () {
+            icon: _keyboardUp ? Icons.keyboard_hide_rounded : Icons.keyboard_rounded,
+            on: _keyboardUp,
+            onTap: () {
               final p = _panes[_paneId];
               _keyboardUp ? p?.focus.unfocus() : _showKeyboard(p);
             },
@@ -1614,59 +1627,147 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     ];
   }
 
+  bool _keysPage2 = false;
+
+  /// Two pages of equal-width keys (no sideways scrolling); ⋯ flips. Arrows repeat while held.
   Widget _extraKeys() {
-    // Key caps; sticky Ctrl/Alt are filled with the accent while armed.
-    Widget btn(String label, VoidCallback onTap, {bool on = false}) => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-          child: Material(
-            color: on ? accent : Colors.white.withValues(alpha: 0.09),
-            borderRadius: BorderRadius.circular(12),
-            child: InkWell(
-              onTap: () {
-                HapticFeedback.selectionClick();
-                onTap();
-              },
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                constraints: const BoxConstraints(minWidth: 42),
-                height: 38,
-                alignment: Alignment.center,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text(label,
-                    style: TextStyle(
-                        fontSize: 15,
-                        color: on ? Colors.black : Colors.white,
-                        fontWeight: on ? FontWeight.w600 : FontWeight.normal)),
-              ),
-            ),
-          ),
+    Widget key(String label, VoidCallback onTap, {bool on = false, bool repeat = false, int flex = 1}) =>
+        Expanded(
+          flex: flex,
+          child: _DockKey(label: label, on: on, repeat: repeat, onTap: onTap),
         );
-    const gap = SizedBox(width: 8);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        child: Row(children: [
-          btn('Esc', () => _key(TerminalKey.escape)),
-          btn('Tab', () => _key(TerminalKey.tab)),
-          btn('Ctrl', () => setState(() => _ctrl = !_ctrl), on: _ctrl),
-          btn('Alt', () => setState(() => _alt = !_alt), on: _alt),
-          btn('^C', () => _bytes(const [0x03])),
-          gap,
-          btn('←', () => _key(TerminalKey.arrowLeft)),
-          btn('↓', () => _key(TerminalKey.arrowDown)),
-          btn('↑', () => _key(TerminalKey.arrowUp)),
-          btn('→', () => _key(TerminalKey.arrowRight)),
-          gap,
-          btn('Prefix', () => _bytes(const [0x02])),
-          btn('Paste', _paste),
-          gap,
-          for (final s in const ['|', '~', '/', '-']) btn(s, () => _text(s)),
-        ]),
-      ),
+    final more = key('⋯', () => setState(() => _keysPage2 = !_keysPage2), on: _keysPage2);
+    final keys = _keysPage2
+        ? [
+            key('^C', () => _bytes(const [0x03])),
+            key('Prefix', () => _bytes(const [0x02]), flex: 2),
+            key('Paste', _paste, flex: 2),
+            for (final s in const ['|', '~', '/', '-']) key(s, () => _text(s)),
+            more,
+          ]
+        : [
+            key('Esc', () => _key(TerminalKey.escape)),
+            key('Tab', () => _key(TerminalKey.tab)),
+            key('Ctrl', () => setState(() => _ctrl = !_ctrl), on: _ctrl),
+            key('Alt', () => setState(() => _alt = !_alt), on: _alt),
+            key('←', () => _key(TerminalKey.arrowLeft), repeat: true),
+            key('↓', () => _key(TerminalKey.arrowDown), repeat: true),
+            key('↑', () => _key(TerminalKey.arrowUp), repeat: true),
+            key('→', () => _key(TerminalKey.arrowRight), repeat: true),
+            more,
+          ];
+    return SizedBox(
+      height: 44,
+      child: Row(children: [
+        for (var i = 0; i < keys.length; i++) ...[if (i > 0) const SizedBox(width: 4), keys[i]],
+      ]),
     );
   }
+}
+
+/// A key cap / dock button: 44 high, glass-on-glass fill, shrinks a little while pressed (120 ms),
+/// accent when [on] (sticky Ctrl/Alt, keyboard up). [repeat]: fires every 70 ms while held.
+class _DockKey extends StatefulWidget {
+  final String? label, tooltip;
+  final IconData? icon;
+  final bool on, repeat;
+  final VoidCallback onTap;
+  const _DockKey({this.label, this.icon, this.tooltip, this.on = false, this.repeat = false, required this.onTap});
+  @override
+  State<_DockKey> createState() => _DockKeyState();
+}
+
+class _DockKeyState extends State<_DockKey> {
+  bool _down = false;
+  Timer? _repeat;
+
+  void _press(bool down) {
+    if (_down != down) setState(() => _down = down);
+    if (!down) {
+      _repeat?.cancel();
+      _repeat = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _repeat?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final on = widget.on;
+    final fg = on ? Colors.black : Colors.white.withValues(alpha: 0.92);
+    final cap = AnimatedScale(
+      scale: _down ? 0.92 : 1,
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOut,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        height: 44,
+        constraints: widget.icon != null ? const BoxConstraints(minWidth: 44) : null,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: on ? accent : Colors.white.withValues(alpha: _down ? 0.2 : 0.08),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: on ? 0 : 0.08), width: 0.5),
+        ),
+        child: widget.icon != null
+            ? Icon(widget.icon, size: 22, color: fg)
+            : FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(widget.label!,
+                      style: TextStyle(fontSize: 15, fontWeight: on ? FontWeight.w600 : FontWeight.w500, color: fg)),
+                ),
+              ),
+      ),
+    );
+    final g = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _press(true),
+      onTapCancel: () => _press(false),
+      onTapUp: (_) => _press(false),
+      onTap: () {
+        HapticFeedback.selectionClick();
+        widget.onTap();
+      },
+      onLongPressStart: widget.repeat
+          ? (_) {
+              _press(true);
+              widget.onTap();
+              _repeat = Timer.periodic(const Duration(milliseconds: 70), (_) => widget.onTap());
+            }
+          : null,
+      onLongPressEnd: widget.repeat ? (_) => _press(false) : null,
+      child: cap,
+    );
+    final t = widget.tooltip;
+    return Semantics(
+      button: true,
+      label: t ?? widget.label,
+      child: t == null ? g : Tooltip(message: t, child: g),
+    );
+  }
+}
+
+/// iOS-style inset group in the sheets: rows on a rounded, slightly lighter card.
+class _Group extends StatelessWidget {
+  final List<Widget> children;
+  const _Group({required this.children});
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.06), width: 0.5),
+        ),
+        child: Material(type: MaterialType.transparency, child: Column(children: children)),
+      );
 }
 
 /// Section label in the bottom sheets.
@@ -1675,7 +1776,7 @@ class _Header extends StatelessWidget {
   const _Header(this.text);
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+        padding: const EdgeInsets.fromLTRB(28, 14, 28, 6),
         child: Text(text.toUpperCase(),
             style: const TextStyle(fontSize: 11, letterSpacing: 1.2, color: accent, fontWeight: FontWeight.w600)),
       );

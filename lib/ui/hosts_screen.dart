@@ -120,7 +120,8 @@ class _HostsScreenState extends State<HostsScreen> {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('tmux pocket', style: TextStyle(fontWeight: FontWeight.w600)),
+        toolbarHeight: 76,
+        title: const Text('tmux pocket', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w700, letterSpacing: -0.5)),
         actions: [
           ValueListenableBuilder<bool>(
             valueListenable: glassEffects,
@@ -132,6 +133,7 @@ class _HostsScreenState extends State<HostsScreen> {
           ),
         ],
       ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
       floatingActionButton: Glass(
         radius: const BorderRadius.all(Radius.circular(28)),
         child: Material(

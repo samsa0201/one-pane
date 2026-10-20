@@ -73,7 +73,7 @@ Android reserves the screen edges for the back gesture, so nothing here uses edg
 Neighbour hints on the terminal edges fade to faint 2 s after the pane changes; touching the terminal
 brings them back.
 
-Extra keys row: Esc Tab Ctrl Alt (sticky) ^C arrows Prefix (C-b) Paste | ~ / -. Paste sends the
+Extra keys: two pages of equal-width keys (⋯ flips): Esc Tab Ctrl Alt (sticky) ← ↓ ↑ → (repeat while held) and ^C Prefix (C-b) Paste | ~ / -. Paste sends the
 clipboard (newlines as Enter), as a bracketed paste when the program asked for it.
 
 ## Develop

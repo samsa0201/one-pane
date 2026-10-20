@@ -20,63 +20,95 @@ void setGlassEffects(bool on) {
   SharedPreferences.getInstance().then((p) => p.setBool(_glassPref, on)).catchError((_) => true);
 }
 
-/// Frosted panel: backdrop blur, a thin white gradient fill and a light rim brighter at the top.
+/// Glass panel modelled on Apple's Liquid Glass (without the refraction shader, which needs the
+/// Flutter GPU preview and is heavy on mid-range Android):
+/// - backdrop blur + saturation boost (the glass picks up and intensifies what is behind it)
+/// - an adaptive dark tint so text on it stays legible over a busy terminal
+/// - a specular glint on the edges facing the light (top-left), a hairline dark contour outside and
+///   a soft inner shadow along the bottom edge (the bevel's thickness)
+/// Off ([glassEffects] false): the same shape, opaque, no backdrop work at all.
 class Glass extends StatelessWidget {
   final Widget child;
   final BorderRadius radius;
   final EdgeInsetsGeometry? padding;
   final double blur;
 
-  /// 0..1: how much the panel lifts off what is behind (fill and rim strength).
+  /// Tint over the frosted backdrop: higher = more opaque / more legible.
+  final double tint;
+
+  /// Glint and fill strength (selected / raised elements use more).
   final double strength;
   const Glass({
     super.key,
     required this.child,
     this.radius = const BorderRadius.all(Radius.circular(24)),
     this.padding,
-    this.blur = 22,
+    this.blur = 24,
+    this.tint = 0.35,
     this.strength = 1,
   });
+
+  /// Saturation matrix (1 = unchanged).
+  static List<double> _saturate(double s) {
+    const r = 0.2126, g = 0.7152, b = 0.0722;
+    final i = 1 - s;
+    return [
+      i * r + s, i * g, i * b, 0, 0, //
+      i * r, i * g + s, i * b, 0, 0,
+      i * r, i * g, i * b + s, 0, 0,
+      0, 0, 0, 1, 0,
+    ];
+  }
+
+  static final _filters = <double, ImageFilter>{};
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<bool>(
     valueListenable: glassEffects,
     builder: (context, on, _) {
+      // Own Material: list tiles / ink inside paint on the glass, not on whatever is underneath.
+      final body = Material(
+        type: MaterialType.transparency,
+        child: padding == null ? child : Padding(padding: padding!, child: child),
+      );
       final panel = DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: radius,
+          color: on ? Color.fromRGBO(14, 17, 24, tint) : const Color(0xFF1B1E26),
           gradient: on
               ? LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                   colors: [
-                    Colors.white.withValues(alpha: 0.13 * strength),
-                    Colors.white.withValues(alpha: 0.04 * strength),
+                    Color.fromRGBO(255, 255, 255, 0.10 * strength),
+                    Color.fromRGBO(14, 17, 24, tint),
+                    Color.fromRGBO(14, 17, 24, tint + 0.08),
                   ],
+                  stops: const [0, 0.45, 1],
                 )
               : null,
-          color: on ? null : const Color(0xFF1C1F26),
-          boxShadow: const [BoxShadow(color: Color(0x40000000), blurRadius: 18, offset: Offset(0, 6))],
+          boxShadow: const [BoxShadow(color: Color(0x59000000), blurRadius: 24, offset: Offset(0, 8))],
         ),
         child: DecoratedBox(
           position: DecorationPosition.foreground,
           decoration: BoxDecoration(borderRadius: radius, border: _Rim(radius, strength)),
-          child: padding == null ? child : Padding(padding: padding!, child: child),
+          child: body,
         ),
       );
       if (!on) return panel;
+      final filter = _filters[blur] ??= ImageFilter.compose(
+        outer: ColorFilter.matrix(_saturate(1.8)),
+        inner: ImageFilter.blur(sigmaX: blur, sigmaY: blur, tileMode: TileMode.mirror),
+      );
       return ClipRRect(
         borderRadius: radius,
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          child: panel,
-        ),
+        child: BackdropFilter(filter: filter, child: panel),
       );
     },
   );
 }
 
-/// Specular rim: bright along the top-left edge, fading toward the bottom.
+/// The bevel: glint on the top-left walls, hairline dark contour, inner shadow at the bottom.
 class _Rim extends BoxBorder {
   final BorderRadius radius;
   final double strength;
@@ -101,21 +133,43 @@ class _Rim extends BoxBorder {
     BoxShape shape = BoxShape.rectangle,
     BorderRadius? borderRadius,
   }) {
-    final rrect = radius.toRRect(rect).deflate(0.5);
+    final rr = radius.toRRect(rect);
+    // inner shadow along the bottom (thickness)
+    canvas.save();
+    canvas.clipRRect(rr);
     canvas.drawRRect(
-      rrect,
+      rr.shift(const Offset(0, -2)).inflate(1),
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1
+        ..strokeWidth = 3
+        ..color = const Color(0x33000000)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+    );
+    canvas.restore();
+    // hairline contour
+    canvas.drawRRect(
+      rr.deflate(0.25),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.5
+        ..color = const Color(0x66000000),
+    );
+    // specular glint: strongest at the top-left, a faint return at the bottom-right
+    canvas.drawRRect(
+      rr.deflate(0.75),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
         ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
           colors: [
-            Colors.white.withValues(alpha: 0.45 * strength),
-            Colors.white.withValues(alpha: 0.06 * strength),
-            Colors.white.withValues(alpha: 0.14 * strength),
+            Color.fromRGBO(255, 255, 255, (0.55 * strength).clamp(0, 1)),
+            Color.fromRGBO(255, 255, 255, 0.10 * strength),
+            Color.fromRGBO(255, 255, 255, 0.04),
+            Color.fromRGBO(255, 255, 255, 0.22 * strength),
           ],
-          stops: const [0, 0.55, 1],
+          stops: const [0, 0.3, 0.7, 1],
         ).createShader(rect),
     );
   }
