@@ -551,7 +551,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       final (x, y) = await client.cursor(id);
       if (seq != p.seeds) return;
       if (reset) _filters[p.term]?.reset();
-      _writer(p.term)('${reset ? '\x1b[0m\x1b[H\x1b[2J' : ''}$screen\x1b[${y + 1};${x + 1}H');
+      // Pen back to default after the capture (its last cell's colour stuck otherwise): apps that
+      // write single characters without SGR (Claude Code's input line) assume the default.
+      _writer(p.term)('${reset ? '\x1b[0m\x1b[H\x1b[2J' : ''}$screen\x1b[0m\x1b[${y + 1};${x + 1}H');
     } catch (_) {
       if (seq != p.seeds) return;
       // pane may have vanished; go live anyway

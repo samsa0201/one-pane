@@ -15,7 +15,8 @@ import 'package:xterm/xterm.dart';
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
 var curLayout = layout; // what list-windows reports
 var modes = '0 0 0';
-var silent = false; // the fake server stops answering (dead connection) // alternate_on mouse_any_flag mouse_sgr_flag of every pane
+var silent = false;
+var screen = ['hello']; // capture-pane of the visible screen // the fake server stops answering (dead connection) // alternate_on mouse_any_flag mouse_sgr_flag of every pane
 
 /// Fake tmux: every command gets `%begin` / scripted lines / `%end`. The controller is tmux's stdout.
 (TmuxClient, List<String>, StreamController<List<int>>) fakeTmux({bool twoWindows = false}) {
@@ -31,7 +32,7 @@ var silent = false; // the fake server stops answering (dead connection) // alte
         _ when c.startsWith('list-sessions') => [r'$0 1 1 main', r'$1 0 2 work'],
         _ when c.startsWith('list-panes') => ['%0 fish', '%1 vim', '%2 htop', '%5 tail'],
         _ when c.startsWith('capture-pane') && c.contains(' -S ') => ['old line 1', 'old line 2'],
-        _ when c.startsWith('capture-pane') => ['hello'],
+        _ when c.startsWith('capture-pane') => screen,
         _ when c.contains('alternate_on') => [modes],
         _ when c.startsWith('display') => ['0 0'],
         _ => [],
@@ -85,6 +86,20 @@ Future<void> twoFingerSwipe(WidgetTester tester, Offset delta) async {
 }
 
 void main() {
+  testWidgets('after the capture the pen is default: bare characters are not in its last colour',
+      (tester) async {
+    screen = ['\x1b[38;5;246mgrey placeholder'];
+    addTearDown(() => screen = ['hello']);
+    await pumpScreen(tester);
+    final term = tester.widget<TerminalView>(find.byType(TerminalView)).terminal;
+    _out.add(utf8.encode('%output %0 \\033[2;1HX\n')); // Claude Code: cursor move + one char, no SGR
+    await tester.pump();
+    final row = term.buffer.lines[term.buffer.scrollBack + 1];
+    expect(String.fromCharCode(row.getCodePoint(0)), 'X');
+    expect(row.getForeground(0), term.buffer.lines[term.buffer.scrollBack + 2].getForeground(0)); // default
+    expect(row.getForeground(0), isNot(term.buffer.lines[term.buffer.scrollBack].getForeground(0)));
+  });
+
   testWidgets('a resized pane is re-captured from tmux, old screen cleared', (tester) async {
     final cmds = await pumpScreen(tester);
     final term = tester.widget<TerminalView>(find.byType(TerminalView)).terminal;
