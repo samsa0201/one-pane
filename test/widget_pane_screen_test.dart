@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tmux_pocket/tmux/control.dart';
+import 'package:tmux_pocket/ui/joystick.dart';
 import 'package:tmux_pocket/ui/minimap.dart';
 import 'package:tmux_pocket/ui/pane_screen.dart';
 import 'package:xterm/xterm.dart';
@@ -109,6 +110,17 @@ void main() {
   testWidgets('two-finger swipe left goes to the right neighbour', (tester) async {
     final cmds = await pumpScreen(tester);
     await twoFingerSwipe(tester, const Offset(-150, 0));
+    expect(cmds, contains('select-pane -Z -t %1'));
+  });
+
+  testWidgets('joystick: push right and let go moves to the right neighbour, no history pull', (tester) async {
+    final cmds = await pumpScreen(tester);
+    final stick = find.byType(Joystick);
+    await tester.drag(stick, const Offset(0, 80)); // down from %0: window edge, and not a pull to history
+    await tester.pumpAndSettle();
+    expect(cmds.where((c) => c.startsWith('select-pane') || c.contains('capture-pane -p -e -J -S')), isEmpty);
+    await tester.drag(stick, const Offset(60, 5));
+    await tester.pumpAndSettle();
     expect(cmds, contains('select-pane -Z -t %1'));
   });
 

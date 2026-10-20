@@ -37,6 +37,7 @@ Keystore-backed secure storage. Host key: trusted on first use, a changed key is
 | minimap | tap a pane | jump to it |
 | minimap | long-press | split ↔ / ↕, zoom, new window, kill pane |
 | minimap | drag (any direction) | scrub: the layout opens large with each pane's command, the finger moves a pointer over it (×3); release on a pane → jump there |
+| joystick (floating, bottom right) | push toward a side, let go / tap | move to that neighbour (chevrons show which exist) / overview; toggle in the sessions sheet |
 | overview | tap a pane / pinch in or **Sessions** button | enter that pane / session map of all windows |
 
 Swipes follow the "move the content" convention: fingers moving left bring in the pane on the right.

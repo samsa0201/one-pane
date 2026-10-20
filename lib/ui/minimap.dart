@@ -7,18 +7,19 @@ import '../tmux/layout.dart';
 
 const accent = Color(0xFF4FC3F7);
 
-/// Pane rectangles scaled (aspect kept) into [box], keyed by pane id.
-Map<int, Rect> scaleRects(List<PaneRect> panes, Size box) {
+/// Pane rectangles scaled (aspect kept, or [stretch]ed to fill) into [box], keyed by pane id.
+Map<int, Rect> scaleRects(List<PaneRect> panes, Size box, {bool stretch = false}) {
   if (panes.isEmpty) return {};
   final w = panes.map((p) => p.x + p.w).reduce(max).toDouble();
   final h = panes.map((p) => p.y + p.h).reduce(max).toDouble();
-  final s = min(box.width / w, box.height / h);
-  return {for (final p in panes) p.id: Rect.fromLTWH(p.x * s, p.y * s, p.w * s, p.h * s)};
+  var sx = box.width / w, sy = box.height / h;
+  if (!stretch) sx = sy = min(sx, sy);
+  return {for (final p in panes) p.id: Rect.fromLTWH(p.x * sx, p.y * sy, p.w * sx, p.h * sy)};
 }
 
 /// Pane id under [pos] in a [box]-sized minimap, or null.
 int? paneAt(List<PaneRect> panes, Size box, Offset pos) {
-  for (final e in scaleRects(panes, box).entries) {
+  for (final e in scaleRects(panes, box, stretch: true).entries) {
     if (e.value.inflate(1).contains(pos)) return e.key;
   }
   return null;
@@ -96,7 +97,8 @@ class MiniMapPainter extends CustomPainter {
     // Small gaps and rounded corners read better than shared 1px borders.
     final small = size.shortestSide < 80;
     final radius = Radius.circular(small ? 2 : 6);
-    for (final e in scaleRects(panes, size).entries) {
+    // Stretched: the map keeps its shape when the window's aspect changes (keyboard up, zoom).
+    for (final e in scaleRects(panes, size, stretch: true).entries) {
       final r = RRect.fromRectAndRadius(e.value.deflate(small ? 1 : 3), radius);
       canvas.drawRRect(r, e.key == currentId ? fill : other);
       if (e.key != currentId) canvas.drawRRect(r, stroke);

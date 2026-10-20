@@ -13,14 +13,15 @@ import '../tmux/control.dart';
 import '../tmux/layout.dart';
 import 'gestures.dart';
 import 'ime_input.dart';
+import 'joystick.dart';
 import 'minimap.dart';
 import 'overview.dart';
 
 const _bar = Color(0xFF1A1C1E); // window bar and extra keys
 
-/// Terminal text: system monospace, then bundled Nerd Font symbols (icons in nvim, prompts), emoji.
-TerminalStyle _termStyle(double size) => TerminalStyle(fontSize: size, fontFamilyFallback: const [
-      'SymbolsNerdFontMono',
+/// Terminal text: bundled Hack Nerd Font Mono (icons in nvim, prompts), then CJK / emoji fallbacks.
+TerminalStyle _termStyle(double size) =>
+    TerminalStyle(fontSize: size, fontFamily: 'HackNerdFontMono', fontFamilyFallback: const [
       'Noto Sans Mono CJK SC',
       'Noto Color Emoji',
       'Noto Sans Symbols',
@@ -106,7 +107,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   // Phone mode (default): tmux sizes the window to our cols×rows at font [_font] and the shown pane is
   // kept zoomed. Desk mode: ignore-size, real pane size, font = fit-to-width × [_zoom] (≥ 1).
-  static const _phonePref = 'phoneMode';
+  static const _phonePref = 'phoneMode', _joystickPref = 'joystick';
+  bool _joystick = true;
   bool? _phoneMode; // null until the pref is loaded: render as phone, send nothing yet
   bool get _phone => _phoneMode ?? true;
   double _font = 13;
@@ -159,7 +161,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     () async {
       var phone = true;
       try {
-        phone = (await SharedPreferences.getInstance()).getBool(_phonePref) ?? true;
+        final prefs = await SharedPreferences.getInstance();
+        phone = prefs.getBool(_phonePref) ?? true;
+        _joystick = prefs.getBool(_joystickPref) ?? true;
       } catch (_) {}
       if (mounted) _setPhone(phone, persist: false);
     }();
@@ -880,6 +884,17 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   setSheet(() {});
                 },
               ),
+              SwitchListTile(
+                title: const Text('Joystick'),
+                subtitle: const Text('Floating stick: push toward a pane and let go to move there; tap for the '
+                    'overview'),
+                value: _joystick,
+                onChanged: (v) {
+                  setState(() => _joystick = v);
+                  setSheet(() {});
+                  SharedPreferences.getInstance().then((p) => p.setBool(_joystickPref, v)).catchError((_) => true);
+                },
+              ),
             ]),
           ),
         ),
@@ -1016,6 +1031,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           MiniMap(
             panes: _rects,
             currentId: _paneId,
+            size: const Size(40, 44), // phone-shaped
             onTapPane: (id) {
               _slideFrom = Offset.zero;
               _showPane(id, select: true);
@@ -1100,7 +1116,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           ),
         );
         final h = _history;
-        return Listener(
+        final area = Listener(
           onPointerDown: _down,
           onPointerMove: _moveP,
           onPointerUp: _up,
@@ -1133,6 +1149,21 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
               ),
           ]),
         );
+        if (!_joystick || h != null) return area; // history: the LIVE chip sits there
+        // Outside the Listener: its drags must not count as terminal gestures (pull to history, pinch).
+        final id = _paneId;
+        return Stack(fit: StackFit.expand, children: [
+          area,
+          Positioned(
+            right: 12,
+            bottom: 12,
+            child: Joystick(
+              available: {for (final d in Dir.values) if (id != null && neighbor(_rects, id, d) != null) d},
+              onMove: _move,
+              onTap: _openOverview,
+            ),
+          ),
+        ]);
       });
 
   /// Read-only tmux history over the live view, starting at the bottom (xterm sticks to the bottom).

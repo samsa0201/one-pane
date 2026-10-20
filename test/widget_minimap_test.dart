@@ -22,12 +22,18 @@ void main() {
     }
   });
 
+  test('scaleRects stretch fills the box whatever the window aspect', () {
+    final r = scaleRects(panes, const Size(40, 44), stretch: true);
+    expect(r[0]!.height, closeTo(44, 0.01));
+    expect(r[1]!.right, closeTo(40, 0.01));
+  });
+
   test('paneAt hits the pane under the point', () {
     const box = Size(64, 40);
     expect(paneAt(panes, box, const Offset(10, 10)), 0);
     expect(paneAt(panes, box, const Offset(50, 5)), 1);
-    expect(paneAt(panes, box, const Offset(50, 18)), 2);
-    expect(paneAt(panes, box, const Offset(63.9, 39.9)), isNull); // below the scaled window
+    expect(paneAt(panes, box, const Offset(50, 30)), 2);
+    expect(paneAt(panes, box, const Offset(63.9, 39.9)), 2); // stretched: the map fills the box
   });
 
   testWidgets('MiniMap paints every pane and fills the current one', (tester) async {
@@ -46,7 +52,7 @@ void main() {
         ..rrect(style: PaintingStyle.stroke),
     );
     final topLeft = tester.getTopLeft(find.byType(MiniMap));
-    await tester.tapAt(topLeft + const Offset(50, 18));
+    await tester.tapAt(topLeft + const Offset(50, 30));
     expect(tapped, 2);
   });
 }
