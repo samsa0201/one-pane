@@ -24,8 +24,16 @@ void main() {
         child: Focus(focusNode: focus, child: const SizedBox.expand()),
       ),
     ));
+    // focus alone (xterm focuses on every touch-down) does not open the keyboard, nor do two fingers
     focus.requestFocus();
     await tester.pump();
+    expect(tester.testTextInput.isVisible, isFalse);
+    final a = await tester.startGesture(const Offset(100, 100), pointer: 1);
+    final b = await tester.startGesture(const Offset(200, 100), pointer: 2);
+    await a.up();
+    await b.up();
+    expect(tester.testTextInput.isVisible, isFalse);
+    await tester.tap(find.byType(SizedBox));
     expect(tester.testTextInput.isVisible, isTrue);
 
     void ime(String text, {TextRange composing = TextRange.empty}) => tester.testTextInput.updateEditingValue(

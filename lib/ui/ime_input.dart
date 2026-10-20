@@ -65,7 +65,10 @@ class ImeInputState extends State<ImeInput> with TextInputClient {
     super.dispose();
   }
 
-  void _focusChanged() => widget.focusNode.hasFocus ? show() : _close();
+  // Focus alone does not open the keyboard: xterm takes focus on every touch-down (swipes, pinches).
+  void _focusChanged() {
+    if (!widget.focusNode.hasFocus) _close();
+  }
 
   /// Opens (or re-shows after the user hid it) the soft keyboard.
   void show() {
@@ -143,18 +146,38 @@ class ImeInputState extends State<ImeInput> with TextInputClient {
   void showToolbar() {}
 
   Offset? _downAt;
+  DateTime _downTime = DateTime(0);
+  int _pointers = 0;
+  bool _multi = false;
 
-  // A tap on the focused terminal brings the keyboard back after the user hid it (back key).
+  // Only a quick one-finger tap opens the keyboard (or brings it back after back hid it).
   // Pointer level: TerminalView's own recognizers win the gesture arena.
+  void _up(PointerEvent e) {
+    _pointers = (_pointers - 1).clamp(0, 10);
+    final d = _downAt;
+    if (_pointers > 0) return;
+    final tap = !_multi &&
+        d != null &&
+        (e.position - d).distance < 16 &&
+        DateTime.now().difference(_downTime).inMilliseconds < 300;
+    _downAt = null;
+    _multi = false;
+    if (tap && e is PointerUpEvent) {
+      widget.focusNode.requestFocus();
+      show();
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Listener(
         behavior: HitTestBehavior.translucent,
-        onPointerDown: (e) => _downAt = e.position,
-        onPointerUp: (e) {
-          final d = _downAt;
-          _downAt = null;
-          if (d != null && (e.position - d).distance < 16 && widget.focusNode.hasFocus) show();
+        onPointerDown: (e) {
+          if (++_pointers > 1) _multi = true;
+          _downAt ??= e.position;
+          if (_pointers == 1) _downTime = DateTime.now();
         },
+        onPointerUp: _up,
+        onPointerCancel: _up,
         child: widget.child,
       );
 }

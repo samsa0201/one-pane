@@ -12,6 +12,7 @@ import 'package:tmux_pocket/ui/pane_screen.dart';
 import 'package:xterm/xterm.dart';
 
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
+var curLayout = layout; // what list-windows reports
 
 /// Fake tmux: every command gets `%begin` / scripted lines / `%end`. The controller is tmux's stdout.
 (TmuxClient, List<String>, StreamController<List<int>>) fakeTmux({bool twoWindows = false}) {
@@ -20,7 +21,7 @@ const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,
   var n = 0;
   List<String> replyFor(String c) => switch (c) {
         _ when c.startsWith('list-windows') => [
-            '@1 0 1 0 %0 $layout $layout main',
+            '@1 0 1 0 %0 $curLayout $curLayout main',
             if (twoWindows) '@2 1 0 0 %5 b25f,160x48,0,0,5 b25f,160x48,0,0,5 logs',
           ],
         _ when c.startsWith('list-sessions') => [r'$0 1 1 main', r'$1 0 2 work'],
@@ -45,6 +46,7 @@ late StreamController<List<int>> _out; // stdout of the last pumpScreen's fake t
 Future<List<String>> pumpScreen(WidgetTester tester,
     {bool twoWindows = false, Future<(Null, TmuxClient)> Function()? reconnect}) async {
   SharedPreferences.setMockInitialValues({});
+  curLayout = layout;
   tester.view.physicalSize = const Size(1080, 2400);
   tester.view.devicePixelRatio = 2.75;
   addTearDown(tester.view.reset);
@@ -73,6 +75,23 @@ Future<void> twoFingerSwipe(WidgetTester tester, Offset delta) async {
 }
 
 void main() {
+  testWidgets('a resized pane is re-captured from tmux, old screen cleared', (tester) async {
+    final cmds = await pumpScreen(tester);
+    final term = tester.widget<TerminalView>(find.byType(TerminalView)).terminal;
+    _out.add(utf8.encode('%output %0 \\033[20;5Hstale junk\n'));
+    await tester.pump();
+    final before = cmds.where((c) => c.startsWith('capture-pane -p -e -J -t %0')).length;
+    curLayout = '7f31,140x48,0,0{60x48,0,0,0,79x48,61,0[79x24,61,0,1,79x23,61,25,2]}';
+    _out.add(utf8.encode('%layout-change @1 $curLayout $curLayout *\n'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump();
+    expect(term.viewWidth, 60);
+    expect(cmds.where((c) => c.startsWith('capture-pane -p -e -J -t %0')).length, before + 1);
+    final lines = [for (var i = 0; i < term.viewHeight; i++) term.buffer.lines[term.buffer.scrollBack + i].toString().trim()];
+    expect(lines.first, 'hello');
+    expect(lines.where((l) => l.contains('junk')), isEmpty);
+  });
+
   testWidgets('phone mode: sizes the client, zooms the shown pane, keyboard hidden', (tester) async {
     final cmds = await pumpScreen(tester);
     expect(cmds, isNot(contains('refresh-client -f ignore-size')));

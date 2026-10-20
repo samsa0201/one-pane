@@ -22,10 +22,12 @@ const _bar = Color(0xFF1A1C1E); // top bar and extra keys
 class _Pane {
   final Terminal term;
   final FocusNode focus = FocusNode();
+  final ime = GlobalKey<ImeInputState>();
   final scroll = ScrollController(); // the live view's own scrollback
   late final ByteConversionSink decoder;
   int state = 0; // 0 capturing (drop output, capture has it), 1 awaiting cursor (buffer), 2 live
   final pending = <List<int>>[];
+  int seeds = 0; // a newer _seed makes an older one stop
   _Pane(this.term);
 }
 
@@ -118,6 +120,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   Map<int, Offset>? _start;
   DateTime _t0 = DateTime.now();
   DateTime? _lastTwoTap;
+  bool _pinchQueued = false;
   double _startZoom = 1, _startFont = 13, _scale = 1;
   bool _pinching = false;
 
@@ -362,6 +365,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (!mounted || windows.isEmpty) return;
     _loadCommands();
     final before = (_winId, _paneId);
+    final resized = <MapEntry<int, _Pane>>[];
     setState(() {
       _windows = windows;
       final active = windows.where((w) => w.active).firstOrNull ?? windows.first;
@@ -385,12 +389,20 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       }
       for (final e in _panes.entries) {
         final r = alive[e.key]!;
-        if (e.value.term.viewWidth != r.w || e.value.term.viewHeight != r.h) e.value.term.resize(r.w, r.h);
+        if (e.value.term.viewWidth != r.w || e.value.term.viewHeight != r.h) {
+          e.value.term.resize(r.w, r.h);
+          // tmux reflows its copy without sending output; xterm's own reflow differs (duplicated or
+          // stale lines after a zoom / keyboard / font change), so take tmux's screen again.
+          resized.add(e);
+        }
       }
       for (final p in win.panes) {
         _ensurePane(win.sizeOf(p.id)!);
       }
     });
+    for (final e in resized) {
+      _seed(e.key, e.value, reset: true);
+    }
     if ((_winId, _paneId) != before) {
       _keepZoomed();
       _wakeHints();
@@ -416,16 +428,21 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _seed(r.id, p);
   }
 
-  /// capture-pane + cursor into the pane's terminal, then live output. [reset]: clear it first (RIS).
+  /// capture-pane + cursor into the pane's terminal, then live output. [reset]: clear it first
+  /// (home + erase: xterm.dart ignores RIS `ESC c`).
   Future<void> _seed(int id, _Pane p, {bool reset = false}) async {
+    final seq = ++p.seeds;
     p.state = 0;
     p.pending.clear();
     try {
       final screen = await client.capturePane(id);
+      if (seq != p.seeds) return;
       p.state = 1;
       final (x, y) = await client.cursor(id);
-      _writer(p.term)('${reset ? '\x1bc' : ''}$screen\x1b[${y + 1};${x + 1}H');
+      if (seq != p.seeds) return;
+      _writer(p.term)('${reset ? '\x1b[0m\x1b[H\x1b[2J' : ''}$screen\x1b[${y + 1};${x + 1}H');
     } catch (_) {
+      if (seq != p.seeds) return;
       // pane may have vanished; go live anyway
     }
     p.state = 2;
@@ -519,18 +536,25 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (_history != null) setState(() => _history = null);
   }
 
+  bool get _keyboardUp => MediaQuery.viewInsetsOf(context).bottom > 0;
+
+  void _showKeyboard(_Pane? p) {
+    p?.focus.requestFocus();
+    p?.ime.currentState?.show();
+  }
+
   // ---------- navigation ----------
 
   void _showPane(int id, {bool select = false}) {
     if (!mounted) return;
-    final hadKeyboard = _panes[_paneId]?.focus.hasFocus ?? false;
+    final hadKeyboard = _keyboardUp; // focus alone outlives a keyboard hidden with back
     setState(() {
       _history = null;
       _paneId = id;
       final r = _termRect;
       if (r != null) _ensurePane(r);
     });
-    if (hadKeyboard) WidgetsBinding.instance.addPostFrameCallback((_) => _panes[id]?.focus.requestFocus());
+    if (hadKeyboard) WidgetsBinding.instance.addPostFrameCallback((_) => _showKeyboard(_panes[id]));
     if (select) _run(client.selectPane(id, keepZoom: _phone));
     _keepZoomed();
     _wakeHints();
@@ -721,15 +745,24 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     }
     final s = _start;
     if (s == null || _ptrs.length != 2 || !s.keys.every(_ptrs.containsKey)) return;
-    _scale = _spread(_ptrs) / _spread(s);
-    if (!_pinching && (_scale - 1).abs() > 0.15) _pinching = true;
-    if (!_pinching) return;
-    setState(() {
-      if (_phone) {
-        _font = ((_startFont * _scale).clamp(8.0, 24.0) * 2).round() / 2; // 0.5 steps
-      } else {
-        _zoom = (_startZoom * _scale).clamp(1.0, 4.0);
-      }
+    // Once per pointer packet: between finger 0's and finger 1's move of one packet the spread looks
+    // changed, and a fast parallel swipe was taken for a pinch.
+    if (_pinchQueued) return;
+    _pinchQueued = true;
+    scheduleMicrotask(() {
+      _pinchQueued = false;
+      final s = _start;
+      if (!mounted || s == null || _ptrs.length != 2 || !s.keys.every(_ptrs.containsKey)) return;
+      _scale = _spread(_ptrs) / _spread(s);
+      if (!_pinching && (_scale - 1).abs() > 0.15) _pinching = true;
+      if (!_pinching) return;
+      setState(() {
+        if (_phone) {
+          _font = ((_startFont * _scale).clamp(8.0, 24.0) * 2).round() / 2; // 0.5 steps
+        } else {
+          _zoom = (_startZoom * _scale).clamp(1.0, 4.0);
+        }
+      });
     });
   }
 
@@ -745,7 +778,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         _move(d);
       } else if (DateTime.now().difference(_t0).inMilliseconds < 300 && delta.distance < 20) {
         final now = DateTime.now();
-        if (_lastTwoTap != null && now.difference(_lastTwoTap!).inMilliseconds < 400) {
+        if (_lastTwoTap != null && now.difference(_lastTwoTap!).inMilliseconds < 500) {
           _lastTwoTap = null;
           if (_paneId != null) _run(client.toggleZoom(_paneId!));
         } else {
@@ -993,9 +1026,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             icon: const Icon(Icons.keyboard, size: 22),
             visualDensity: VisualDensity.compact,
             onPressed: () {
-              final f = _panes[_paneId]?.focus;
-              if (f == null) return;
-              f.hasFocus ? f.unfocus() : f.requestFocus();
+              final p = _panes[_paneId];
+              _keyboardUp ? p?.focus.unfocus() : _showKeyboard(p);
             },
           ),
         ]),
@@ -1029,6 +1061,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                 removeRight: true,
                 // Soft keyboard through ImeInput (Vietnamese IMEs); TerminalView only takes hardware keys.
                 child: ImeInput(
+                  key: p.ime,
                   focusNode: p.focus,
                   onInsert: p.term.textInput,
                   onBackspace: () => p.term.keyInput(TerminalKey.backspace),
