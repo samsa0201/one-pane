@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' show ParagraphBuilder, ParagraphConstraints;
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
@@ -15,6 +16,7 @@ import '../tmux/layout.dart';
 import 'gestures.dart';
 import 'ime_input.dart';
 import 'joystick.dart';
+import 'term_filter.dart';
 import 'minimap.dart';
 import 'overview.dart';
 
@@ -109,6 +111,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   double _lineH = 16; // terminal line height in px, set by build
   int _gesturePtrs = 0; // max fingers down in this gesture
   bool _reconnecting = false;
+  // Heartbeat: a no-op tmux command every 5 s; its round trip is the latency shown in the bar, no reply
+  // in time = a dead connection (TCP can stay silent for minutes after a network change).
+  Timer? _beatTimer;
+  bool _beating = false;
+  final _filters = Expando<TermFilter>();
+  int? _rttMs;
+  StreamSubscription<List<ConnectivityResult>>? _netSub;
+  Completer<void>? _kick; // completes to retry a reconnect right away (network back, app resumed)
   TmuxEvent? _lastEvent; // ignoring output; %sessions-changed right before %exit = session killed
   bool _hintsLit = true; // edge hints at full opacity (else dimmed)
   Timer? _hintTimer;
@@ -165,6 +175,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _attach();
     _reload();
     // pane_current_command changes without a tmux notification
+    _beatTimer = Timer.periodic(const Duration(seconds: 5), (_) => _beat());
+    try {
+      _netSub = Connectivity().onConnectivityChanged.listen((_) => _probe(), onError: (_) {});
+    } catch (_) {} // no plugin (tests)
     _cmdTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       final visible = ModalRoute.of(context)?.isCurrent ?? true;
       if (visible && !_reconnecting && !_exited && WidgetsBinding.instance.lifecycleState != AppLifecycleState.paused) {
@@ -234,6 +248,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _sub.cancel();
     _reloadTimer?.cancel();
     _cmdTimer?.cancel();
+    _beatTimer?.cancel();
+    _netSub?.cancel();
     _sizeTimer?.cancel();
     _hintTimer?.cancel();
     _bump.dispose();
@@ -268,12 +284,33 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed || _exited || _reconnecting) return;
-    // The socket may have died silently while we were in the background: probe it.
-    final c = client;
-    c.cmd("display -p ok").timeout(const Duration(seconds: 5)).then((_) {}, onError: (_) {
-      if (c == client) _lost('Connection lost');
-    });
+    if (state == AppLifecycleState.resumed) _probe(); // the socket may have died in the background
+  }
+
+  /// Network changed or app back: check now with a short timeout (over Tailscale the connection often
+  /// survives a wifi ↔ mobile switch), or retry at once if already reconnecting.
+  void _probe() {
+    if (_exited) return;
+    if (_reconnecting) {
+      if (!(_kick?.isCompleted ?? true)) _kick!.complete();
+      return;
+    }
+    _beat(timeout: const Duration(seconds: 3));
+  }
+
+  Future<void> _beat({Duration timeout = const Duration(seconds: 8)}) async {
+    if (_beating || _reconnecting || _exited) return;
+    if (WidgetsBinding.instance.lifecycleState case AppLifecycleState.paused || AppLifecycleState.hidden) return;
+    _beating = true;
+    final c = client, sw = Stopwatch()..start();
+    try {
+      await c.cmd('display -p ok').timeout(timeout);
+      if (mounted && c == client) setState(() => _rttMs = sw.elapsedMilliseconds);
+    } catch (_) {
+      if (c == client) _lost('No reply from the server');
+    } finally {
+      _beating = false;
+    }
   }
 
   /// Connection dropped (not by us): reconnect if we can, else leave.
@@ -283,18 +320,23 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _reconnectLoop();
   }
 
-  /// Retries with backoff 1, 2, 4, 8, 15, 15... s for about 2 minutes.
+  /// Retries at once, then after 1, 2, 4, 8, 15, 15... s (or right away when the network comes back /
+  /// the app resumes) for about 5 minutes.
   Future<void> _reconnectLoop() async {
-    setState(() => _reconnecting = true);
+    setState(() {
+      _reconnecting = true;
+      _rttMs = null;
+    });
     _sub.cancel();
     client.close().catchError((_) {});
     _ssh?.close();
-    final until = DateTime.now().add(const Duration(minutes: 2));
-    var delay = 1;
+    final until = DateTime.now().add(const Duration(minutes: 5));
+    var delay = 0;
     Object? error;
     while (DateTime.now().isBefore(until)) {
-      await Future<void>.delayed(Duration(seconds: delay));
-      delay = min(delay * 2, 15);
+      final kick = _kick = Completer<void>();
+      await Future.any([Future<void>.delayed(Duration(seconds: delay)), kick.future]);
+      delay = delay == 0 ? 1 : min(delay * 2, 15);
       if (!mounted || _exited) return;
       try {
         final (ssh, c) = await widget.reconnect!();
@@ -308,6 +350,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         _attach();
         await _restore();
         if (mounted) setState(() => _reconnecting = false);
+        _beat();
         return;
       } catch (e) {
         error = e;
@@ -452,7 +495,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   /// The shown pane's screen/mouse modes from tmux, so a scroll knows what it means before it starts.
   void _refreshModes() {
     final p = _panes[_paneId], id = _paneId;
-    if (p != null && id != null) client.paneModes(id).then((m) => p.modes = m, onError: (_) {});
+    if (p == null || id == null) return;
+    client.paneModes(id).then((m) {
+      p.modes = m;
+    }, onError: (_) {});
   }
 
   /// Creates the pane's Terminal at its tmux size and seeds it with capture-pane + cursor.
@@ -479,6 +525,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       p.state = 1;
       final (x, y) = await client.cursor(id);
       if (seq != p.seeds) return;
+      if (reset) _filters[p.term]?.reset();
       _writer(p.term)('${reset ? '\x1b[0m\x1b[H\x1b[2J' : ''}$screen\x1b[${y + 1};${x + 1}H');
     } catch (_) {
       if (seq != p.seeds) return;
@@ -493,10 +540,11 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   /// Writes to a terminal; replies the terminal emulator generates while parsing
   /// (DA, DSR...) are dropped: tmux already answered the program.
+  /// Output goes through a [TermFilter] per terminal (sequences xterm.dart misreads).
   void Function(String) _writer(Terminal t) => (s) {
         _writing = true;
         try {
-          t.write(s);
+          t.write((_filters[t] ??= TermFilter()).add(s));
         } finally {
           _writing = false;
         }
@@ -652,7 +700,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     }
     if (!mounted || id != _paneId) return;
     final t = Terminal(maxLines: 5000)..resize(r.w, r.h);
-    t.write(text);
+    t.write(TermFilter().add(text));
     _histAway = false;
     setState(() => _history = (id, t));
     // first frame lays out the view at its bottom; then the drag so far
@@ -1148,7 +1196,18 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(_session,
+                  Text.rich(
+                      TextSpan(text: _session, children: [
+                        if (_rttMs case final ms?)
+                          TextSpan(
+                              text: '  ${ms}ms',
+                              style: TextStyle(
+                                  color: ms < 150
+                                      ? Colors.greenAccent.withValues(alpha: 0.7)
+                                      : ms < 400
+                                          ? Colors.amberAccent
+                                          : Colors.redAccent)),
+                      ]),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 11, color: Colors.white54, letterSpacing: 0.3)),

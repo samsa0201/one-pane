@@ -26,6 +26,14 @@ Keystore-backed secure storage. Host key: trusted on first use, a changed key is
 - **Desk mode** (toggle in the session sheet): never resizes anything; shows the pane at its real
   size, font fitted to width, pinch to enlarge and pan.
 
+### Connection
+SSH + tmux control mode (not mosh: mosh syncs screen images, control mode needs the byte stream).
+tmux keeps the session, the app reconnects to the same pane:
+- heartbeat every 5 s (a no-op tmux command); its round trip is shown next to the session name;
+  no reply in 8 s = dead connection → reconnect (TCP alone can stay silent for minutes)
+- network change or app back from the background → probe within 3 s, or retry at once while
+  reconnecting; retries: immediately, then 1, 2, 4, 8, 15 s… for 5 minutes
+
 ### Gestures
 | Where | Gesture | Does |
 |---|---|---|

@@ -14,7 +14,8 @@ import 'package:xterm/xterm.dart';
 
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
 var curLayout = layout; // what list-windows reports
-var modes = '0 0 0'; // alternate_on mouse_any_flag mouse_sgr_flag of every pane
+var modes = '0 0 0';
+var silent = false; // the fake server stops answering (dead connection) // alternate_on mouse_any_flag mouse_sgr_flag of every pane
 
 /// Fake tmux: every command gets `%begin` / scripted lines / `%end`. The controller is tmux's stdout.
 (TmuxClient, List<String>, StreamController<List<int>>) fakeTmux({bool twoWindows = false}) {
@@ -38,7 +39,7 @@ var modes = '0 0 0'; // alternate_on mouse_any_flag mouse_sgr_flag of every pane
   final client = TmuxClient(out.stream, (data) {
     final c = data.trim();
     cmds.add(c);
-    if (c == 'detach-client') return;
+    if (c == 'detach-client' || silent) return;
     n++;
     out.add(utf8.encode('%begin 1 $n 1\n${replyFor(c).map((l) => '$l\n').join()}%end 1 $n 1\n'));
   });
@@ -51,6 +52,7 @@ Future<List<String>> pumpScreen(WidgetTester tester,
     {bool twoWindows = false, Future<(Null, TmuxClient)> Function()? reconnect}) async {
   SharedPreferences.setMockInitialValues({});
   curLayout = layout;
+  silent = false;
   tester.view.physicalSize = const Size(1080, 2400);
   tester.view.devicePixelRatio = 2.75;
   addTearDown(tester.view.reset);
@@ -234,7 +236,7 @@ void main() {
     late List<String> cmds2;
     var calls = 0;
     await pumpScreen(tester, reconnect: () async {
-      calls++;
+      if (++calls == 1) throw Exception('network down'); // first, immediate try fails
       final (c, cmds, _) = fakeTmux();
       cmds2 = cmds;
       return (null, c);
@@ -242,9 +244,9 @@ void main() {
     await _out.close();
     await tester.pump(const Duration(milliseconds: 10));
     expect(find.text('Reconnecting…'), findsOneWidget);
-    expect(calls, 0);
-    await tester.pump(const Duration(seconds: 1));
     expect(calls, 1);
+    await tester.pump(const Duration(seconds: 1));
+    expect(calls, 2);
     await tester.pump(const Duration(milliseconds: 50));
     await tester.pump(const Duration(milliseconds: 200)); // size debounce
     expect(find.text('Reconnecting…'), findsNothing);
@@ -252,6 +254,27 @@ void main() {
     expect(cmds2, contains('capture-pane -p -e -J -t %0'));
     expect(cmds2, contains(startsWith('refresh-client -C ')));
     expect(cmds2, contains("if -F -t %0 '#{?window_zoomed_flag,,1}' 'resize-pane -Z -t %0'"));
+  });
+
+  testWidgets('heartbeat: latency in the bar; no reply in time reconnects', (tester) async {
+    var calls = 0;
+    final cmds = await pumpScreen(tester, reconnect: () async {
+      calls++;
+      return (null, fakeTmux().$1);
+    });
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    expect(cmds, contains('display -p ok'));
+    expect(find.textContaining(RegExp(r'main  \d+ms')), findsOneWidget);
+
+    silent = true; // connection silently dead
+    await tester.pump(const Duration(seconds: 5)); // next beat
+    await tester.pump(const Duration(seconds: 7));
+    expect(calls, 0);
+    silent = false; // (the new fake answers)
+    await tester.pump(const Duration(seconds: 2)); // 8 s without a reply
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(calls, 1);
   });
 
   testWidgets('killed session (%sessions-changed + %exit) does not reconnect', (tester) async {
