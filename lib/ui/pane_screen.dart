@@ -16,6 +16,8 @@ import 'ime_input.dart';
 import 'minimap.dart';
 import 'overview.dart';
 
+const _bar = Color(0xFF1A1C1E); // top bar and extra keys
+
 /// One tmux pane mirrored into an xterm Terminal.
 class _Pane {
   final Terminal term;
@@ -770,13 +772,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           child: FutureBuilder<List<SessionInfo>>(
             future: client.listSessions(),
             builder: (ctx, snap) => ListView(shrinkWrap: true, children: [
-              const ListTile(dense: true, title: Text('Sessions')),
+              const _Header('Sessions'),
               for (final s in snap.data ?? const <SessionInfo>[])
                 ListTile(
                   leading: const Icon(Icons.dns),
                   title: Text(s.name),
-                  subtitle: Text('${s.windows} windows'),
+                  subtitle: Text('${s.windows} windows${s.attached ? ' · attached' : ''}'),
                   selected: s.name == _session,
+                  trailing: s.name == _session ? const Icon(Icons.check, size: 20) : null,
                   onTap: () {
                     Navigator.pop(ctx);
                     if (s.name != _session) _run(client.switchSession(s.name));
@@ -792,13 +795,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                 },
               ),
               const Divider(),
-              const ListTile(dense: true, title: Text('Windows')),
+              const _Header('Windows'),
               for (final w in _windows)
                 ListTile(
                   leading: const Icon(Icons.web_asset),
                   title: Text('${w.index}:${w.name}'),
                   subtitle: Text('${w.panes.length} panes${w.zoomed ? ' · zoomed' : ''}'),
                   selected: w.id == _winId,
+                  trailing: SizedBox(
+                      width: 40, height: 26, child: MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(40, 26))),
                   onTap: () {
                     Navigator.pop(ctx);
                     _selectWindow(w.id);
@@ -915,7 +920,6 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   Widget _topBar() {
     final w = _window;
-    final title = w == null ? _session : '$_session › ${w.index}:${w.name}${w.zoomed ? '  [Z]' : ''}';
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: _sheet,
@@ -928,11 +932,43 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         if (dx.abs() > 200 || _barDx.abs() > 60) _stepWindow(dx < 0 ? 1 : -1);
       },
       child: Container(
-        height: 48,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        color: const Color(0xFF1E1E1E),
+        height: 52,
+        padding: const EdgeInsets.only(left: 12, right: 4),
+        decoration: const BoxDecoration(color: _bar, border: Border(bottom: BorderSide(color: Colors.white10))),
         child: Row(children: [
-          Expanded(child: Text(title, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16))),
+          Expanded(
+            child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_session,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: Colors.white54, letterSpacing: 0.3)),
+                  Row(children: [
+                    Flexible(
+                      child: Text(w == null ? '…' : '${w.index}:${w.name}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    ),
+                    if (w != null && _windows.length > 1)
+                      Text('  ${_windows.indexOf(w) + 1}/${_windows.length}',
+                          style: const TextStyle(fontSize: 11, color: Colors.white38)),
+                    if (w?.zoomed ?? false)
+                      Container(
+                        margin: const EdgeInsets.only(left: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: accent.withValues(alpha: 0.7)),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text('Z', style: TextStyle(fontSize: 10, color: accent)),
+                      ),
+                  ]),
+                ]),
+          ),
+          const SizedBox(width: 8),
           MiniMap(
             panes: _rects,
             currentId: _paneId,
@@ -948,12 +984,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           ),
           IconButton(
             tooltip: 'Overview',
-            icon: const Icon(Icons.grid_view),
+            icon: const Icon(Icons.grid_view, size: 22),
+            visualDensity: VisualDensity.compact,
             onPressed: _openOverview,
           ),
           IconButton(
             tooltip: 'Keyboard',
-            icon: const Icon(Icons.keyboard),
+            icon: const Icon(Icons.keyboard, size: 22),
+            visualDensity: VisualDensity.compact,
             onPressed: () {
               final f = _panes[_paneId]?.focus;
               if (f == null) return;
@@ -1107,38 +1145,70 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   }
 
   Widget _extraKeys() {
-    Widget btn(String label, VoidCallback onTap, {bool on = false}) => InkWell(
-          onTap: onTap,
-          child: Container(
-            constraints: const BoxConstraints(minWidth: 40),
-            height: 40,
-            alignment: Alignment.center,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            color: on ? accent.withValues(alpha: 0.4) : null,
-            child: Text(label, style: const TextStyle(fontSize: 15)),
+    // Key caps; sticky Ctrl/Alt are filled with the accent while armed.
+    Widget btn(String label, VoidCallback onTap, {bool on = false}) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+          child: Material(
+            color: on ? accent : Colors.white.withValues(alpha: 0.07),
+            borderRadius: BorderRadius.circular(6),
+            child: InkWell(
+              onTap: () {
+                HapticFeedback.selectionClick();
+                onTap();
+              },
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                constraints: const BoxConstraints(minWidth: 42),
+                height: 38,
+                alignment: Alignment.center,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Text(label,
+                    style: TextStyle(
+                        fontSize: 15,
+                        color: on ? Colors.black : Colors.white,
+                        fontWeight: on ? FontWeight.w600 : FontWeight.normal)),
+              ),
+            ),
           ),
         );
+    const gap = SizedBox(width: 8);
     return Container(
-      color: const Color(0xFF1E1E1E),
+      decoration: const BoxDecoration(color: _bar, border: Border(top: BorderSide(color: Colors.white10))),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
         child: Row(children: [
           btn('Esc', () => _key(TerminalKey.escape)),
           btn('Tab', () => _key(TerminalKey.tab)),
           btn('Ctrl', () => setState(() => _ctrl = !_ctrl), on: _ctrl),
           btn('Alt', () => setState(() => _alt = !_alt), on: _alt),
           btn('^C', () => _bytes(const [0x03])),
+          gap,
           btn('←', () => _key(TerminalKey.arrowLeft)),
           btn('↓', () => _key(TerminalKey.arrowDown)),
           btn('↑', () => _key(TerminalKey.arrowUp)),
           btn('→', () => _key(TerminalKey.arrowRight)),
+          gap,
           btn('Prefix', () => _bytes(const [0x02])),
           btn('Paste', _paste),
+          gap,
           for (final s in const ['|', '~', '/', '-']) btn(s, () => _text(s)),
         ]),
       ),
     );
   }
+}
+
+/// Section label in the bottom sheets.
+class _Header extends StatelessWidget {
+  final String text;
+  const _Header(this.text);
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+        child: Text(text.toUpperCase(),
+            style: const TextStyle(fontSize: 11, letterSpacing: 1.2, color: accent, fontWeight: FontWeight.w600)),
+      );
 }
 
 /// Slim translucent label over the terminal.
@@ -1149,15 +1219,19 @@ class _Pill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        margin: const EdgeInsets.all(4),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
+        margin: const EdgeInsets.all(6),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xCC1A1C1E),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white12),
+        ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           if (progress) ...[
             const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
             const SizedBox(width: 6),
           ],
-          Text(text, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          Text(text, style: const TextStyle(fontSize: 12, color: Colors.white70)),
         ]),
       );
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
 import '../tmux/control.dart';
+import '../tmux/layout.dart';
 import 'minimap.dart';
 
 /// What the user picked in the overview / session map. Exactly one field is set.
@@ -124,10 +125,14 @@ class _PaneThumb extends StatelessWidget {
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
         color: Colors.black,
-        border: Border.all(color: current ? accent : Colors.white38, width: current ? 2 : 1),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: current ? accent : Colors.white24, width: current ? 2 : 1),
+        boxShadow: current ? [BoxShadow(color: accent.withValues(alpha: 0.35), blurRadius: 8)] : null,
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('%$id', style: TextStyle(color: current ? accent : Colors.white70, fontSize: 10)),
+        Text('%$id',
+            style: TextStyle(
+                color: current ? accent : Colors.white54, fontSize: 10, fontWeight: current ? FontWeight.w600 : null)),
         Expanded(
           child: ClipRect(
             child: Text(
@@ -171,13 +176,25 @@ class _SessionMapState extends State<SessionMap> {
     }();
   }
 
-  Widget _card(String title, String subtitle, bool active, OverviewResult r) => Card(
-        color: active ? accent.withValues(alpha: 0.25) : null,
+  Widget _card(String title, String subtitle, bool active, OverviewResult r, {List<PaneRect>? panes, int? activePane}) => Card(
+        color: active ? accent.withValues(alpha: 0.18) : null,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: active ? accent : Colors.white12),
+        ),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: () => Navigator.pop(context, r),
           child: Padding(
             padding: const EdgeInsets.all(8),
             child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+              if (panes != null) ...[
+                MiniMap(panes: panes, currentId: activePane, size: const Size(56, 34)),
+                const SizedBox(height: 6),
+              ] else ...[
+                const Icon(Icons.dns_outlined, size: 28, color: Colors.white54),
+                const SizedBox(height: 6),
+              ],
               Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center),
               Text(subtitle, style: const TextStyle(fontSize: 11, color: Colors.white54)),
             ]),
@@ -190,7 +207,8 @@ class _SessionMapState extends State<SessionMap> {
     final cards = <Widget>[
       for (final w in _windows)
         _card('${w.index}:${w.name}', '${widget.session} · ${w.panes.length} panes', w.active,
-            OverviewResult(windowId: w.id)),
+            OverviewResult(windowId: w.id),
+            panes: w.panes, activePane: w.activePane),
       for (final s in _sessions.where((s) => s.name != widget.session))
         _card(s.name, '${s.windows} windows', false, OverviewResult(session: s.name)),
     ];

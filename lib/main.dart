@@ -29,7 +29,13 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'tmux pocket',
-      theme: ThemeData(brightness: Brightness.dark, colorSchemeSeed: const Color(0xFF4FC3F7)),
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        colorSchemeSeed: const Color(0xFF4FC3F7),
+        bottomSheetTheme: const BottomSheetThemeData(showDragHandle: true),
+        snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+        listTileTheme: const ListTileThemeData(selectedTileColor: Color(0x224FC3F7)),
+      ),
       home: const HostsScreen(),
     );
   }

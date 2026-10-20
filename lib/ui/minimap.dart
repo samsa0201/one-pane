@@ -88,14 +88,18 @@ class MiniMapPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final fill = Paint()..color = accent;
+    final other = Paint()..color = Colors.white.withValues(alpha: 0.08);
     final stroke = Paint()
-      ..color = Colors.white70
+      ..color = Colors.white38
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
+    // Small gaps and rounded corners read better than shared 1px borders.
+    final small = size.shortestSide < 80;
+    final radius = Radius.circular(small ? 2 : 6);
     for (final e in scaleRects(panes, size).entries) {
-      final r = e.value.deflate(0.5);
-      if (e.key == currentId) canvas.drawRect(r, fill);
-      canvas.drawRect(r, stroke);
+      final r = RRect.fromRectAndRadius(e.value.deflate(small ? 1 : 3), radius);
+      canvas.drawRRect(r, e.key == currentId ? fill : other);
+      if (e.key != currentId) canvas.drawRRect(r, stroke);
     }
   }
 

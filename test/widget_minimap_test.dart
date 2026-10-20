@@ -39,10 +39,11 @@ void main() {
     expect(
       tester.renderObject(box),
       paints
-        ..rect(style: PaintingStyle.stroke)
-        ..rect(color: accent)
-        ..rect(style: PaintingStyle.stroke)
-        ..rect(style: PaintingStyle.stroke),
+        ..rrect(style: PaintingStyle.fill)
+        ..rrect(style: PaintingStyle.stroke)
+        ..rrect(color: accent)
+        ..rrect(style: PaintingStyle.fill)
+        ..rrect(style: PaintingStyle.stroke),
     );
     final topLeft = tester.getTopLeft(find.byType(MiniMap));
     await tester.tapAt(topLeft + const Offset(50, 18));

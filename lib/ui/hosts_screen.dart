@@ -78,26 +78,56 @@ class _HostsScreenState extends State<HostsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('tmux pocket')),
-      floatingActionButton: FloatingActionButton(onPressed: _edit, child: const Icon(Icons.add)),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _edit,
+        icon: const Icon(Icons.add),
+        label: const Text('Host'),
+      ),
       body: _hosts.isEmpty
-          ? const Center(child: Text('No hosts yet. Tap + to add one.'))
-          : ListView(children: [
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.terminal, size: 56, color: scheme.primary),
+                  const SizedBox(height: 16),
+                  Text('No hosts yet', style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  Text('Add an SSH host; tmux is attached in control mode, one pane at a time.',
+                      textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
+                ]),
+              ),
+            )
+          : ListView(padding: const EdgeInsets.fromLTRB(12, 8, 12, 88), children: [
               for (final h in _hosts)
-                ListTile(
-                  leading: _connecting == h.id
-                      ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.terminal),
-                  title: Text(h.name),
-                  subtitle: Text('${h.user}@${h.host}:${h.port} · ${h.session}'),
-                  onTap: () => _connect(h),
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (v) => v == 'edit' ? _edit(h) : _delete(h),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'edit', child: Text('Edit')),
-                      PopupMenuItem(value: 'delete', child: Text('Delete')),
-                    ],
+                Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  clipBehavior: Clip.antiAlias,
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.only(left: 16, right: 4),
+                    leading: CircleAvatar(
+                      backgroundColor: scheme.primaryContainer,
+                      foregroundColor: scheme.onPrimaryContainer,
+                      child: _connecting == h.id
+                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                          : Text(h.name.isEmpty ? '?' : h.name.characters.first.toUpperCase()),
+                    ),
+                    title: Text(h.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                      _connecting == h.id ? 'Connecting…' : '${h.user}@${h.host}:${h.port} · ${h.session}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => _connect(h),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (v) => v == 'edit' ? _edit(h) : _delete(h),
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'edit', child: Text('Edit')),
+                        PopupMenuItem(value: 'delete', child: Text('Delete')),
+                      ],
+                    ),
                   ),
                 ),
             ]),
