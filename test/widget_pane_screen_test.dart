@@ -21,6 +21,7 @@ var curLayout = layout; // what list-windows reports
   final cmds = <String>[];
   var n = 0;
   List<String> replyFor(String c) => switch (c) {
+        _ when c.startsWith('list-windows -t') => ['0 1 editor', '1 2 server'],
         _ when c.startsWith('list-windows') => [
             '@1 0 1 0 %0 $curLayout $curLayout main',
             if (twoWindows) '@2 1 0 0 %5 b25f,160x48,0,0,5 b25f,160x48,0,0,5 logs',
@@ -122,6 +123,18 @@ void main() {
     await tester.drag(stick, const Offset(60, 5));
     await tester.pumpAndSettle();
     expect(cmds, contains('select-pane -Z -t %1'));
+  });
+
+  testWidgets('sheet: another session opens to its windows; tapping one goes there', (tester) async {
+    final cmds = await pumpScreen(tester);
+    await tester.tap(find.textContaining('0:main')); // window bar → sheet
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('work'));
+    await tester.pumpAndSettle();
+    expect(cmds, contains("list-windows -t 'work' -F '#{window_index} #{window_panes} #{window_name}'"));
+    await tester.tap(find.text('1:server'));
+    await tester.pumpAndSettle();
+    expect(cmds, containsAllInOrder(["select-window -t 'work:1'", "switch-client -t 'work'"]));
   });
 
   testWidgets('swipe toward an edge without neighbour selects nothing', (tester) async {

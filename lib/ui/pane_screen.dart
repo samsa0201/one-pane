@@ -107,8 +107,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   // Phone mode (default): tmux sizes the window to our cols×rows at font [_font] and the shown pane is
   // kept zoomed. Desk mode: ignore-size, real pane size, font = fit-to-width × [_zoom] (≥ 1).
-  static const _phonePref = 'phoneMode', _joystickPref = 'joystick';
+  static const _phonePref = 'phoneMode', _joystickPref = 'joystick', _stickPref = 'joystickPos';
   bool _joystick = true;
+  Offset? _stick; // joystick centre as a fraction of the terminal area; null: bottom right
   bool? _phoneMode; // null until the pref is loaded: render as phone, send nothing yet
   bool get _phone => _phoneMode ?? true;
   double _font = 13;
@@ -164,6 +165,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         final prefs = await SharedPreferences.getInstance();
         phone = prefs.getBool(_phonePref) ?? true;
         _joystick = prefs.getBool(_joystickPref) ?? true;
+        if (prefs.getString(_stickPref)?.split(',').map(double.tryParse).toList() case [final x?, final y?]) {
+          _stick = Offset(x, y);
+        }
       } catch (_) {}
       if (mounted) _setPhone(phone, persist: false);
     }();
@@ -616,6 +620,27 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _selectWindow(_windows[j].id, slideFrom: Offset(delta.toDouble(), 0));
   }
 
+  /// Next / previous session (tmux's list order); bump at the ends.
+  Future<void> _stepSession(int delta) async {
+    final List<SessionInfo> ss;
+    try {
+      ss = await client.listSessions();
+    } catch (_) {
+      return;
+    }
+    final i = ss.indexWhere((s) => s.name == _session);
+    final j = i + delta;
+    if (!mounted) return;
+    if (i < 0 || j < 0 || j >= ss.length) {
+      _bumpDir = Offset(0, delta.toDouble());
+      _bump.forward(from: 0);
+      HapticFeedback.lightImpact();
+      return;
+    }
+    _slideFrom = Offset(0, delta.toDouble());
+    _run(client.switchSession(ss[j].name));
+  }
+
   Future<void> _openOverview() async {
     final w = _window;
     if (w == null) return;
@@ -820,17 +845,59 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             future: client.listSessions(),
             builder: (ctx, snap) => ListView(shrinkWrap: true, children: [
               const _Header('Sessions'),
+              // Each session opens to its windows; the current one starts open.
               for (final s in snap.data ?? const <SessionInfo>[])
-                ListTile(
-                  leading: const Icon(Icons.dns),
-                  title: Text(s.name),
+                ExpansionTile(
+                  key: PageStorageKey('session ${s.name}'),
+                  initiallyExpanded: s.name == _session,
+                  leading: Icon(Icons.dns, color: s.name == _session ? accent : null),
+                  title: Text(s.name, style: TextStyle(color: s.name == _session ? accent : null)),
                   subtitle: Text('${s.windows} windows${s.attached ? ' · attached' : ''}'),
-                  selected: s.name == _session,
-                  trailing: s.name == _session ? const Icon(Icons.check, size: 20) : null,
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    if (s.name != _session) _run(client.switchSession(s.name));
-                  },
+                  childrenPadding: const EdgeInsets.only(left: 16),
+                  children: s.name == _session
+                      ? [
+                          for (final w in _windows)
+                            ListTile(
+                              leading: const Icon(Icons.web_asset),
+                              title: Text('${w.index}:${w.name}'),
+                              subtitle: Text('${w.panes.length} panes${w.zoomed ? ' · zoomed' : ''}'),
+                              selected: w.id == _winId,
+                              trailing: SizedBox(
+                                  width: 40,
+                                  height: 26,
+                                  child: MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(40, 26))),
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _selectWindow(w.id);
+                              },
+                            ),
+                          ListTile(
+                            leading: const Icon(Icons.add),
+                            title: const Text('New window'),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _run(client.newWindow());
+                            },
+                          ),
+                        ]
+                      : [
+                          FutureBuilder<List<(int, String, int)>>(
+                            future: client.listWindowsOf(s.name),
+                            builder: (ctx, ws) => Column(children: [
+                              if (!ws.hasData) const LinearProgressIndicator(minHeight: 1),
+                              for (final (idx, name, panes) in ws.data ?? const <(int, String, int)>[])
+                                ListTile(
+                                  leading: const Icon(Icons.web_asset),
+                                  title: Text('$idx:$name'),
+                                  subtitle: Text('$panes panes'),
+                                  onTap: () {
+                                    Navigator.pop(ctx);
+                                    _run(client.switchTo(s.name, idx));
+                                  },
+                                ),
+                            ]),
+                          ),
+                        ],
                 ),
               ListTile(
                 leading: const Icon(Icons.add),
@@ -839,29 +906,6 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   Navigator.pop(ctx);
                   final name = await _askName('New session');
                   if (name != null && name.isNotEmpty) _run(client.newSession(name));
-                },
-              ),
-              const Divider(),
-              const _Header('Windows'),
-              for (final w in _windows)
-                ListTile(
-                  leading: const Icon(Icons.web_asset),
-                  title: Text('${w.index}:${w.name}'),
-                  subtitle: Text('${w.panes.length} panes${w.zoomed ? ' · zoomed' : ''}'),
-                  selected: w.id == _winId,
-                  trailing: SizedBox(
-                      width: 40, height: 26, child: MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(40, 26))),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _selectWindow(w.id);
-                  },
-                ),
-              ListTile(
-                leading: const Icon(Icons.add),
-                title: const Text('New window'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _run(client.newWindow());
                 },
               ),
               const Divider(),
@@ -1152,15 +1196,41 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         if (!_joystick || h != null) return area; // history: the LIVE chip sits there
         // Outside the Listener: its drags must not count as terminal gestures (pull to history, pinch).
         final id = _paneId;
+        const half = 36.0; // joystick radius
+        final area0 = Size(c.maxWidth, c.maxHeight);
+        Offset clampIn(Offset p) => Offset(p.dx.clamp(half, max(half, area0.width - half)),
+            p.dy.clamp(half, max(half, area0.height - half)));
+        Offset stickCenter() {
+          final st = _stick;
+          return clampIn(st == null
+              ? Offset(area0.width - 12 - half, area0.height - 12 - half)
+              : Offset(st.dx * area0.width, st.dy * area0.height));
+        }
+
+        final center = stickCenter();
         return Stack(fit: StackFit.expand, children: [
           area,
           Positioned(
-            right: 12,
-            bottom: 12,
+            left: center.dx - half,
+            top: center.dy - half,
             child: Joystick(
               available: {for (final d in Dir.values) if (id != null && neighbor(_rects, id, d) != null) d},
               onMove: _move,
+              onWindow: _stepWindow,
+              onSession: _stepSession,
               onTap: _openOverview,
+              // From the current position, not this build's: several moves can arrive between frames.
+              onDragBy: (d) => setState(() {
+                final p = clampIn(stickCenter() + d);
+                _stick = Offset(p.dx / area0.width, p.dy / area0.height);
+              }),
+              onDragEnd: () {
+                final st = _stick;
+                if (st == null) return;
+                SharedPreferences.getInstance()
+                    .then((p) => p.setString(_stickPref, '${st.dx},${st.dy}'))
+                    .catchError((_) => true);
+              },
             ),
           ),
         ]);

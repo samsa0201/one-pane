@@ -43,8 +43,31 @@ public class Mt {
         gesture(f[1] - g / 2, f[2], f[1] + g / 2, f[2], 0, 0, 0, 0, 60);
         break;
       }
-      default: throw new IllegalArgumentException("swipe2|pinch|tap2|dtap2");
+      case "tapdrag": { // x y dx dy ms [pauseMs]: tap, then a drag from the same point (double tap + slide)
+        drag1(f[1], f[2], 0, 0, 40, 0);
+        SystemClock.sleep(a.length > 6 ? (long) f[6] : 100);
+        drag1(f[1], f[2], f[3], f[4], (long) f[5], 0);
+        break;
+      }
+      case "holddrag": { // x y dx dy ms holdMs: press still for holdMs, then drag
+        drag1(f[1], f[2], f[3], f[4], (long) f[5], (long) f[6]);
+        break;
+      }
+      default: throw new IllegalArgumentException("swipe2|pinch|tap2|dtap2|tapdrag|holddrag");
     }
+  }
+
+  /** One finger from (x,y) by (dx,dy) over ms, after holding still for holdMs. */
+  static void drag1(float x, float y, float dx, float dy, long ms, long holdMs) throws Exception {
+    long down = SystemClock.uptimeMillis();
+    send(down, down, MotionEvent.ACTION_DOWN, 1, x, y, 0, 0);
+    if (holdMs > 0) SystemClock.sleep(holdMs);
+    int steps = Math.max(1, (int) (ms / 10));
+    for (int i = 1; i <= steps; i++) {
+      SystemClock.sleep(ms / steps);
+      send(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, 1, x + dx * i / steps, y + dy * i / steps, 0, 0);
+    }
+    send(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, 1, x + dx, y + dy, 0, 0);
   }
 
   /** Finger 0 from (x0,y0) by (dx0,dy0), finger 1 from (x1,y1) by (dx1,dy1), over ms. */

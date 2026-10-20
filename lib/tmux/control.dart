@@ -231,6 +231,21 @@ class TmuxClient {
     return ws;
   }
 
+  /// (index, name, panes) of the windows of any [session], sorted by index.
+  Future<List<(int, String, int)>> listWindowsOf(String session) async {
+    final lines = await cmd("list-windows -t ${_q(session)} -F '#{window_index} #{window_panes} #{window_name}'");
+    return [
+      for (final l in lines)
+        if (l.split(' ') case [final idx, final n, ...final name]) (int.parse(idx), name.join(' '), int.parse(n)),
+    ]..sort((a, b) => a.$1.compareTo(b.$1));
+  }
+
+  /// Attach to [session] showing its window [index].
+  Future<void> switchTo(String session, int index) async {
+    await cmd('select-window -t ${_q('$session:$index')}');
+    await switchSession(session);
+  }
+
   Future<void> sendBytes(int paneId, List<int> bytes) async {
     final cmds = <Future<List<String>>>[];
     for (var i = 0; i < bytes.length; i += 256) {
