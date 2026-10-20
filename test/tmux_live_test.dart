@@ -79,7 +79,7 @@ void main() {
       hist = await c.captureHistory(p1);
     }
     expect(hist, contains('\r\n20\r\n')); // scrolled off the 40-row pane
-    expect(hist, isNot(contains('\r\n100'))); // still on screen
+    expect(hist, contains('\r\n100')); // and the visible screen, so its bottom matches the live view
 
     final (cx, cy) = await c.cursor(p1);
     expect(cx, greaterThanOrEqualTo(0));

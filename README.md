@@ -29,6 +29,7 @@ Keystore-backed secure storage. Host key: trusted on first use, a changed key is
 ### Gestures
 | Where | Gesture | Does |
 |---|---|---|
+| terminal | one-finger drag ↑ ↓ | scroll, as tmux sees the pane: shell / logs / inline TUIs → tmux history view (scrollbar, "↑ N lines", fling; back at the bottom or LIVE → live); full-screen apps → mouse wheel if the app enabled the mouse, else arrow keys |
 | terminal | two-finger swipe ← → ↑ ↓ | move to the neighbouring pane in that direction (bump if none) |
 | terminal | pinch | font size (phone mode); pinch in at the minimum → window overview |
 | terminal | two-finger double tap | toggle tmux zoom |

@@ -14,6 +14,7 @@ import 'package:xterm/xterm.dart';
 
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
 var curLayout = layout; // what list-windows reports
+var modes = '0 0 0'; // alternate_on mouse_any_flag mouse_sgr_flag of every pane
 
 /// Fake tmux: every command gets `%begin` / scripted lines / `%end`. The controller is tmux's stdout.
 (TmuxClient, List<String>, StreamController<List<int>>) fakeTmux({bool twoWindows = false}) {
@@ -30,6 +31,7 @@ var curLayout = layout; // what list-windows reports
         _ when c.startsWith('list-panes') => ['%0 fish', '%1 vim', '%2 htop', '%5 tail'],
         _ when c.startsWith('capture-pane') && c.contains(' -S ') => ['old line 1', 'old line 2'],
         _ when c.startsWith('capture-pane') => ['hello'],
+        _ when c.contains('alternate_on') => [modes],
         _ when c.startsWith('display') => ['0 0'],
         _ => [],
       };
@@ -137,6 +139,32 @@ void main() {
     expect(cmds, containsAllInOrder(["select-window -t 'work:1'", "switch-client -t 'work'"]));
   });
 
+  testWidgets('alternate screen: a one-finger drag scrolls the app (SGR wheel or arrow keys)', (tester) async {
+    modes = '1 1 1';
+    addTearDown(() => modes = '0 0 0');
+    final cmds = await pumpScreen(tester);
+    await tester.dragFrom(const Offset(150, 300), const Offset(0, 200)); // finger down = wheel up
+    await tester.pumpAndSettle();
+    final wheelUp = cmds.where((c) => c.startsWith('send-keys -t %0 -H 1b 5b 3c 36 34 3b')).length;
+    expect(wheelUp, greaterThan(3));
+    expect(find.text('LIVE'), findsNothing); // no history view on the alt screen
+
+    modes = '1 0 0';
+    await tester.dragFrom(const Offset(150, 500), const Offset(0, -5)); // a touch refreshes the modes
+    await tester.pumpAndSettle();
+    await tester.dragFrom(const Offset(150, 500), const Offset(0, -200)); // finger up = later = arrow down
+    await tester.pumpAndSettle();
+    expect(cmds.where((c) => c == 'send-keys -t %0 -H 1b 5b 42' || c == 'send-keys -t %0 -H 1b 4f 42'),
+        isNotEmpty);
+  });
+
+  testWidgets('main screen: dragging up at the live bottom does nothing', (tester) async {
+    final cmds = await pumpScreen(tester);
+    await tester.dragFrom(const Offset(150, 500), const Offset(0, -300));
+    await tester.pumpAndSettle();
+    expect(cmds.where((c) => c.contains('capture-pane -p -e -J -S') || c.startsWith('send-keys')), isEmpty);
+  });
+
   testWidgets('swipe toward an edge without neighbour selects nothing', (tester) async {
     final cmds = await pumpScreen(tester);
     await twoFingerSwipe(tester, const Offset(150, 0)); // go left from %0: window edge
@@ -187,7 +215,7 @@ void main() {
     final cmds = await pumpScreen(tester);
     await tester.dragFrom(const Offset(150, 300), const Offset(0, 300));
     await tester.pumpAndSettle();
-    expect(cmds, contains('capture-pane -p -e -J -S -2000 -E -1 -t %0'));
+    expect(cmds, contains('capture-pane -p -e -J -S -2000 -t %0'));
     expect(find.text('LIVE'), findsOneWidget);
     expect(find.byType(TerminalView), findsNWidgets(2));
     await tester.tap(find.text('LIVE'));

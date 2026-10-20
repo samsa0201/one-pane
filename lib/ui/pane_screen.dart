@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:ui' show ParagraphBuilder, ParagraphConstraints;
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -39,6 +40,7 @@ class _Pane {
   int state = 0; // 0 capturing (drop output, capture has it), 1 awaiting cursor (buffer), 2 live
   final pending = <List<int>>[];
   int seeds = 0; // a newer _seed makes an older one stop
+  (bool, bool, bool) modes = (false, false, false); // tmux's alternate_on, mouse_any, mouse_sgr
   _Pane(this.term);
 }
 
@@ -94,7 +96,17 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   Timer? _reloadTimer, _cmdTimer;
   Map<int, String> _commands = {}; // pane id → #{pane_current_command}, for the edge hints
   (int, Terminal)? _history; // read-only tmux scrollback overlay of that pane
-  double _pull = 0; // px dragged down at the top of the live view in this gesture
+  // One-finger vertical drag = scroll, decided by tmux's view of the pane: main screen → tmux history
+  // view (opened by the drag, which keeps driving it, then flings); alternate screen → wheel / arrows.
+  Offset? _scrollFrom; // where this one-finger gesture started; null: not (or no longer) a scroll candidate
+  bool _scrolling = false;
+  double _scrollDy = 0; // alt screen: px not yet sent as lines
+  VelocityTracker? _vt;
+  bool _histDrag = false; // this gesture opened the history view and drives it
+  double _histPending = 0; // drag px that arrived before the history view was ready
+  bool _histAway = false; // the history view was scrolled off its bottom (back at the bottom → live)
+  final _histScroll = ScrollController();
+  double _lineH = 16; // terminal line height in px, set by build
   int _gesturePtrs = 0; // max fingers down in this gesture
   bool _reconnecting = false;
   TmuxEvent? _lastEvent; // ignoring output; %sessions-changed right before %exit = session killed
@@ -218,6 +230,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _histScroll.dispose();
     _sub.cancel();
     _reloadTimer?.cancel();
     _cmdTimer?.cancel();
@@ -421,6 +434,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     for (final e in resized) {
       _seed(e.key, e.value, reset: true);
     }
+    _refreshModes();
     if ((_winId, _paneId) != before) {
       _keepZoomed();
       _wakeHints();
@@ -428,10 +442,17 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   }
 
   Future<void> _loadCommands() async {
+    _refreshModes();
     try {
       final c = await client.paneCommands();
       if (mounted) setState(() => _commands = c);
     } catch (_) {}
+  }
+
+  /// The shown pane's screen/mouse modes from tmux, so a scroll knows what it means before it starts.
+  void _refreshModes() {
+    final p = _panes[_paneId], id = _paneId;
+    if (p != null && id != null) client.paneModes(id).then((m) => p.modes = m, onError: (_) {});
   }
 
   /// Creates the pane's Terminal at its tmux size and seeds it with capture-pane + cursor.
@@ -532,6 +553,91 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         if (mounted && !_reconnecting) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
       });
 
+  // ---------- one-finger scroll ----------
+
+  void _scrollDown(PointerDownEvent e) {
+    _scrollFrom = _history != null && !_histDrag ? null : e.position; // an open history view scrolls itself
+    _scrolling = false;
+    _scrollDy = 0;
+    _vt = VelocityTracker.withKind(e.kind)..addPosition(e.timeStamp, e.position);
+    _refreshModes(); // usually back before the slop is passed
+  }
+
+  void _scrollMove(PointerMoveEvent e) {
+    final from = _scrollFrom, p = _panes[_paneId], id = _paneId;
+    if (from == null || p == null || id == null) return;
+    _vt?.addPosition(e.timeStamp, e.position);
+    var dy = e.delta.dy;
+    if (!_scrolling) {
+      final d = e.position - from;
+      if (d.distance < 12) return;
+      if (d.dx.abs() > d.dy.abs()) {
+        _scrollFrom = null; // sideways: not a scroll
+        return;
+      }
+      _scrolling = true;
+      dy = d.dy; // the slop counts
+    }
+    final (alt, mouse, sgr) = p.modes;
+    if (alt && _histDrag) {
+      _histDrag = false; // the modes came back late: it is a full-screen app after all
+      _closeHistory();
+    }
+    if (!alt) {
+      if (_history == null) {
+        if (dy <= 0) return; // already at the live bottom
+        _histDrag = true;
+        _histPending = 0;
+        _openHistory();
+      }
+      _dragHistory(dy);
+      return;
+    }
+    // Alternate screen (vim, less, htop, TUIs): whole lines as mouse wheel if the app asked for the
+    // mouse, else arrow keys. Finger down = earlier content = wheel up.
+    _scrollDy += dy;
+    final lines = _scrollDy ~/ _lineH;
+    if (lines == 0) return;
+    _scrollDy -= lines * _lineH;
+    final up = lines > 0;
+    final r = _termRect;
+    final col = (r?.w ?? 2) ~/ 2 + 1, row = (r?.h ?? 2) ~/ 2 + 1;
+    for (var i = 0; i < lines.abs(); i++) {
+      if (mouse) {
+        final b = up ? 64 : 65;
+        _run(client.sendBytes(
+            id,
+            sgr
+                ? utf8.encode('\x1b[<$b;$col;${row}M')
+                : [0x1b, 0x5b, 0x4d, 32 + b, min(255, 32 + col), min(255, 32 + row)]));
+      } else {
+        p.term.keyInput(up ? TerminalKey.arrowUp : TerminalKey.arrowDown);
+      }
+    }
+  }
+
+  void _scrollEnd() {
+    if (_histDrag) {
+      _histDrag = false;
+      final v = _vt?.getVelocity().pixelsPerSecond.dy ?? 0;
+      final pos = _histScroll.hasClients ? _histScroll.position : null;
+      if (pos is ScrollPositionWithSingleContext) pos.goBallistic(-v); // native fling from our drag
+    }
+    _scrollFrom = null;
+    _scrolling = false;
+    _vt = null;
+  }
+
+  void _dragHistory(double dy) {
+    if (!_histScroll.hasClients) {
+      _histPending += dy; // still capturing
+      return;
+    }
+    final pos = _histScroll.position;
+    if (!pos.hasContentDimensions) return;
+    _histScroll.jumpTo((pos.pixels - dy).clamp(pos.minScrollExtent, pos.maxScrollExtent));
+  }
+
   // ---------- tmux scrollback ----------
 
   /// The live view only has what arrived since attach; older lines come from tmux's history.
@@ -547,7 +653,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (!mounted || id != _paneId) return;
     final t = Terminal(maxLines: 5000)..resize(r.w, r.h);
     t.write(text);
+    _histAway = false;
     setState(() => _history = (id, t));
+    // first frame lays out the view at its bottom; then the drag so far
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final dy = _histPending;
+      _histPending = 0;
+      if (dy != 0) _dragHistory(dy);
+    });
   }
 
   void _closeHistory() {
@@ -576,6 +689,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (select) _run(client.selectPane(id, keepZoom: _phone));
     _keepZoomed();
     _wakeHints();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshModes());
   }
 
   void _move(Dir d) {
@@ -606,6 +720,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _run(client.selectWindow(id));
     _keepZoomed();
     _wakeHints();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshModes());
   }
 
   void _stepWindow(int delta) {
@@ -753,8 +868,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   void _down(PointerDownEvent e) {
     _wakeHints();
     _ptrs[e.pointer] = e.position;
-    if (_ptrs.length == 1) _pull = 0;
+    if (_ptrs.length == 1) _scrollDown(e);
     _gesturePtrs = max(_gesturePtrs, _ptrs.length);
+    if (_ptrs.length > 1) _scrollFrom = null;
     if (_ptrs.length == 2) {
       _start = Map.of(_ptrs);
       _t0 = DateTime.now();
@@ -770,18 +886,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   void _moveP(PointerMoveEvent e) {
     if (!_ptrs.containsKey(e.pointer)) return;
     _ptrs[e.pointer] = e.position;
-    if (_gesturePtrs == 1) {
-      // One finger dragging down while the live view is at the top of its own scrollback (main screen;
-      // on the alt screen TerminalView turns drags into wheel/arrow keys for the app).
-      final p = _panes[_paneId];
-      final sc = p?.scroll;
-      if (p != null &&
-          sc != null &&
-          !p.term.isUsingAltBuffer &&
-          (!sc.hasClients || sc.position.pixels <= sc.position.minScrollExtent + 0.5)) {
-        _pull += e.delta.dy;
-      }
-    }
+    if (_gesturePtrs == 1) _scrollMove(e);
     final s = _start;
     if (s == null || _ptrs.length != 2 || !s.keys.every(_ptrs.containsKey)) return;
     // Once per pointer packet: between finger 0's and finger 1's move of one packet the spread looks
@@ -827,9 +932,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     }
     _ptrs.remove(e.pointer);
     if (_ptrs.isEmpty) {
-      if (_gesturePtrs == 1 && _pull > 40) _openHistory();
+      if (_gesturePtrs == 1) _scrollEnd();
       _gesturePtrs = 0;
-      _pull = 0;
     }
   }
 
@@ -1116,7 +1220,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         final cwPerPt = _cell(100).width / 100;
         final font = _phone ? _font : c.maxWidth / (r.w * cwPerPt) * _zoom;
         final width = max(c.maxWidth, r.w * cwPerPt * font);
-        final termH = max(c.maxHeight, r.h * _cell(font).height);
+        _lineH = _cell(font).height;
+        final termH = max(c.maxHeight, r.h * _lineH);
         final view = KeyedSubtree(
           key: ValueKey(r.id),
           child: SingleChildScrollView(
@@ -1144,14 +1249,18 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                     onInsert: p.term.textInput,
                     onBackspace: () => p.term.keyInput(TerminalKey.backspace),
                     onEnter: () => p.term.keyInput(TerminalKey.enter),
-                    child: TerminalView(
-                      p.term,
-                      focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
-                      scrollController: p.scroll,
-                      autoResize: false,
-                      hardwareKeyboardOnly: true,
-                      textScaler: TextScaler.noScaling,
-                      textStyle: _termStyle(font),
+                    // Pointer-transparent: scrolls, taps and gestures are ours (tmux decides what a scroll
+                    // means); the view keeps its focus node for hardware keys.
+                    child: IgnorePointer(
+                      child: TerminalView(
+                        p.term,
+                        focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
+                        scrollController: p.scroll,
+                        autoResize: false,
+                        hardwareKeyboardOnly: true,
+                        textScaler: TextScaler.noScaling,
+                        textStyle: _termStyle(font),
+                      ),
                     ),
                   ),
                 ),
@@ -1245,14 +1354,45 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
               context: context,
               removeTop: true,
               removeBottom: true,
-              child: TerminalView(
-                t,
-                readOnly: true,
-                hardwareKeyboardOnly: true,
-                autoResize: false,
-                textScaler: TextScaler.noScaling,
-                textStyle: _termStyle(font),
+              // Scrolled back down to the bottom by the user → live again.
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (n) {
+                  if (n.metrics.extentAfter > _lineH) _histAway = true;
+                  if (n is ScrollEndNotification && _histAway && !_histDrag && n.metrics.extentAfter < 1) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) => _closeHistory());
+                  }
+                  return false;
+                },
+                child: Scrollbar(
+                  controller: _histScroll,
+                  thumbVisibility: true,
+                  interactive: true,
+                  thickness: 6,
+                  child: TerminalView(
+                    t,
+                    readOnly: true,
+                    hardwareKeyboardOnly: true,
+                    autoResize: false,
+                    scrollController: _histScroll,
+                    textScaler: TextScaler.noScaling,
+                    textStyle: _termStyle(font),
+                  ),
+                ),
               ),
+            ),
+          ),
+        ),
+        // How far back: lines above the live bottom (top right: the up-neighbour hint is top centre).
+        Align(
+          alignment: Alignment.topRight,
+          child: IgnorePointer(
+            child: ListenableBuilder(
+              listenable: _histScroll,
+              builder: (context, _) {
+                final pos = _histScroll.hasClients ? _histScroll.position : null;
+                final back = pos != null && pos.hasContentDimensions ? (pos.extentAfter / _lineH).round() : 0;
+                return _Pill('History · ↑ $back lines');
+              },
             ),
           ),
         ),

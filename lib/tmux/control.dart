@@ -261,9 +261,19 @@ class TmuxClient {
   /// Visible screen with escapes, lines joined with \r\n (trailing empty lines dropped).
   Future<String> capturePane(int paneId) async => _joined(await cmd('capture-pane -p -e -J -t %$paneId'));
 
-  /// Up to [lines] history lines above the visible screen, same format as [capturePane].
+  /// Up to [lines] history lines plus the visible screen (so its bottom matches the live view),
+  /// same format as [capturePane].
   Future<String> captureHistory(int paneId, {int lines = 2000}) async =>
-      _joined(await cmd('capture-pane -p -e -J -S -$lines -E -1 -t %$paneId'));
+      _joined(await cmd('capture-pane -p -e -J -S -$lines -t %$paneId'));
+
+  /// (alternate screen on, app asked for mouse events, SGR mouse encoding) as tmux sees the pane: our
+  /// local terminal misses modes set before we attached.
+  Future<(bool, bool, bool)> paneModes(int paneId) async {
+    final l = (await cmd("display -p -t %$paneId '#{alternate_on} #{mouse_any_flag} #{mouse_sgr_flag}'"))
+        .first
+        .split(' ');
+    return (l[0] == '1', l.length > 1 && l[1] == '1', l.length > 2 && l[2] == '1');
+  }
 
   static String _joined(List<String> lines) {
     while (lines.isNotEmpty && lines.last.isEmpty) {

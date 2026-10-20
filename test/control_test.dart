@@ -152,11 +152,11 @@ void main() {
     final ch = c.captureHistory(3, lines: 500);
     reply(['old1', '\x1b[32mold2', '']);
     expect(await ch, 'old1\r\n\x1b[32mold2');
-    expect(w.last, 'capture-pane -p -e -J -S -500 -E -1 -t %3\n');
+    expect(w.last, 'capture-pane -p -e -J -S -500 -t %3\n');
     final ch2 = c.captureHistory(3);
     reply([]);
     expect(await ch2, '');
-    expect(w.last, 'capture-pane -p -e -J -S -2000 -E -1 -t %3\n');
+    expect(w.last, 'capture-pane -p -e -J -S -2000 -t %3\n');
 
     final ns = c.newSession("it's");
     reply([]);
