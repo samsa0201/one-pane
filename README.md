@@ -22,6 +22,9 @@ Reopening: the app remembers the session and pane per host; if it went away whil
 (swiped away, killed), the next start reconnects straight there. Leaving with back starts on the
 host list next time.
 
+Home-screen widget (*tmux hosts*, resizable): lists the hosts with the session you were last in;
+tap a host to connect straight there, tap the header for the host list.
+
 Fish: set `set -U fish_handle_reflow 0` on the server; with 1 (the default) fish prints a fresh prompt
 every time tmux resizes the pane (each pane switch in phone mode), and the old ones pile up.
 
