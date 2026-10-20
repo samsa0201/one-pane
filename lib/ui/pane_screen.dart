@@ -25,6 +25,8 @@ import 'overview.dart';
 /// Terminal text: bundled Hack Nerd Font Mono (icons in nvim, prompts), then CJK / emoji fallbacks.
 TerminalStyle _termStyle(double size) =>
     TerminalStyle(fontSize: size, fontFamily: 'HackNerdFontMono', fontFamilyFallback: const [
+      'PocketSymbols2', // ⏵ ⏺ ✻ ✓ ☐ … (Claude Code's UI)
+      'PocketSymbols', // ⎿ ⎯
       'Noto Sans Mono CJK SC',
       'Noto Color Emoji',
       'Noto Sans Symbols',

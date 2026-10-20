@@ -74,3 +74,11 @@ flutter:
         - asset: assets/fonts/HackNerdFontMono-BoldItalic.ttf
           weight: 700
           style: italic
+    # Symbols Hack lacks (Claude Code's ⏵ ⏺ ⎿ ✻ ✓ ☐ …): Noto Sans Symbols 2 / Symbols (OFL), subset to
+    # arrows, technical, geometric, misc symbols, dingbats.
+    - family: PocketSymbols2
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols2-Subset.ttf
+    - family: PocketSymbols
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols-Subset.ttf
