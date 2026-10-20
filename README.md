@@ -32,8 +32,8 @@ Keystore-backed secure storage. Host key: trusted on first use, a changed key is
 | terminal | two-finger swipe ← → ↑ ↓ | move to the neighbouring pane in that direction (bump if none) |
 | terminal | pinch | font size (phone mode); pinch in at the minimum → window overview |
 | terminal | two-finger double tap | toggle tmux zoom |
-| top bar | swipe left / right | next / previous window |
-| top bar | tap | sessions & windows sheet (switch, new, follow, phone mode) |
+| window bar (bottom) | swipe left / right | next / previous window |
+| window bar | tap | sessions & windows sheet (switch, new, follow, phone mode) |
 | minimap | tap a pane | jump to it |
 | minimap | long-press | split ↔ / ↕, zoom, new window, kill pane |
 | minimap | drag (any direction) | scrub: the layout opens large with each pane's command, the finger moves a pointer over it (×3); release on a pane → jump there |

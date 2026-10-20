@@ -16,7 +16,17 @@ import 'ime_input.dart';
 import 'minimap.dart';
 import 'overview.dart';
 
-const _bar = Color(0xFF1A1C1E); // top bar and extra keys
+const _bar = Color(0xFF1A1C1E); // window bar and extra keys
+
+/// Terminal text: system monospace, then bundled Nerd Font symbols (icons in nvim, prompts), emoji.
+TerminalStyle _termStyle(double size) => TerminalStyle(fontSize: size, fontFamilyFallback: const [
+      'SymbolsNerdFontMono',
+      'Noto Sans Mono CJK SC',
+      'Noto Color Emoji',
+      'Noto Sans Symbols',
+      'monospace',
+      'sans-serif',
+    ]);
 
 /// One tmux pane mirrored into an xterm Terminal.
 class _Pane {
@@ -131,7 +141,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   /// The shown pane's real size (zoomed: the visible-layout rect).
   PaneRect? get _termRect => _paneId == null ? null : _window?.sizeOf(_paneId!);
 
-  Size _cell(double font) => _cells[font] ??= terminalCellSize(TerminalStyle(fontSize: font));
+  Size _cell(double font) => _cells[font] ??= terminalCellSize(_termStyle(font));
 
   @override
   void initState() {
@@ -939,8 +949,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       body: SafeArea(
         child: Stack(fit: StackFit.expand, children: [
           Column(children: [
-            _topBar(),
+            // Window bar at the bottom, next to the thumb; the terminal gets the top of the screen.
             Expanded(child: _terminalArea()),
+            _topBar(),
             _extraKeys(),
           ]),
           if (_scrubFrom != null) _scrubOverlay(),
@@ -967,7 +978,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       child: Container(
         height: 52,
         padding: const EdgeInsets.only(left: 12, right: 4),
-        decoration: const BoxDecoration(color: _bar, border: Border(bottom: BorderSide(color: Colors.white10))),
+        decoration: const BoxDecoration(color: _bar, border: Border(top: BorderSide(color: Colors.white10))),
         child: Row(children: [
           Expanded(
             child: Column(
@@ -1045,6 +1056,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         final cwPerPt = _cell(100).width / 100;
         final font = _phone ? _font : c.maxWidth / (r.w * cwPerPt) * _zoom;
         final width = max(c.maxWidth, r.w * cwPerPt * font);
+        final termH = max(c.maxHeight, r.h * _cell(font).height);
         final view = KeyedSubtree(
           key: ValueKey(r.id),
           child: SingleChildScrollView(
@@ -1053,27 +1065,34 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             child: SizedBox(
               width: width,
               height: c.maxHeight,
-              child: MediaQuery.removePadding(
-                context: context,
-                removeTop: true,
-                removeBottom: true,
-                removeLeft: true,
-                removeRight: true,
-                // Soft keyboard through ImeInput (Vietnamese IMEs); TerminalView only takes hardware keys.
-                child: ImeInput(
-                  key: p.ime,
-                  focusNode: p.focus,
-                  onInsert: p.term.textInput,
-                  onBackspace: () => p.term.keyInput(TerminalKey.backspace),
-                  onEnter: () => p.term.keyInput(TerminalKey.enter),
-                  child: TerminalView(
-                    p.term,
-                    focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
-                    scrollController: p.scroll,
-                    autoResize: false,
-                    hardwareKeyboardOnly: true,
-                    textScaler: TextScaler.noScaling,
-                    textStyle: TerminalStyle(fontSize: font),
+              // Never shorter than the pane, top-aligned: while the keyboard slides up and before tmux has
+              // shrunk the pane, the bottom rows hide behind it instead of xterm pushing the screen up.
+              child: OverflowBox(
+                alignment: Alignment.topLeft,
+                minHeight: termH,
+                maxHeight: termH,
+                child: MediaQuery.removePadding(
+                  context: context,
+                  removeTop: true,
+                  removeBottom: true,
+                  removeLeft: true,
+                  removeRight: true,
+                  // Soft keyboard through ImeInput (Vietnamese IMEs); TerminalView only takes hardware keys.
+                  child: ImeInput(
+                    key: p.ime,
+                    focusNode: p.focus,
+                    onInsert: p.term.textInput,
+                    onBackspace: () => p.term.keyInput(TerminalKey.backspace),
+                    onEnter: () => p.term.keyInput(TerminalKey.enter),
+                    child: TerminalView(
+                      p.term,
+                      focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
+                      scrollController: p.scroll,
+                      autoResize: false,
+                      hardwareKeyboardOnly: true,
+                      textScaler: TextScaler.noScaling,
+                      textStyle: _termStyle(font),
+                    ),
                   ),
                 ),
               ),
@@ -1131,7 +1150,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                 hardwareKeyboardOnly: true,
                 autoResize: false,
                 textScaler: TextScaler.noScaling,
-                textStyle: TerminalStyle(fontSize: font),
+                textStyle: _termStyle(font),
               ),
             ),
           ),
