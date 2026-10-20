@@ -49,7 +49,10 @@ var silent = false; // the fake server stops answering (dead connection) // alte
 late StreamController<List<int>> _out; // stdout of the last pumpScreen's fake tmux
 
 Future<List<String>> pumpScreen(WidgetTester tester,
-    {bool twoWindows = false, Future<(Null, TmuxClient)> Function()? reconnect}) async {
+    {bool twoWindows = false,
+    Future<(Null, TmuxClient)> Function()? reconnect,
+    int? initialPane,
+    void Function(String, int)? onPlace}) async {
   SharedPreferences.setMockInitialValues({});
   curLayout = layout;
   silent = false;
@@ -58,7 +61,8 @@ Future<List<String>> pumpScreen(WidgetTester tester,
   addTearDown(tester.view.reset);
   final (client, cmds, out) = fakeTmux(twoWindows: twoWindows);
   _out = out;
-  await tester.pumpWidget(MaterialApp(home: PaneScreen(client: client, session: 'main', reconnect: reconnect)));
+  await tester.pumpWidget(MaterialApp(home: PaneScreen(
+          client: client, session: 'main', reconnect: reconnect, initialPane: initialPane, onPlace: onPlace)));
   await tester.pump(const Duration(milliseconds: 50));
   await tester.pump(const Duration(milliseconds: 200)); // size debounce
   return cmds;
@@ -165,6 +169,22 @@ void main() {
     await tester.dragFrom(const Offset(150, 500), const Offset(0, -300));
     await tester.pumpAndSettle();
     expect(cmds.where((c) => c.contains('capture-pane -p -e -J -S') || c.startsWith('send-keys')), isEmpty);
+  });
+
+  testWidgets('opens on the remembered pane and reports where the user goes', (tester) async {
+    final places = <(String, int)>[];
+    final cmds = await pumpScreen(tester, initialPane: 2, onPlace: (s, p) => places.add((s, p)));
+    expect(cmds, contains('select-pane -Z -t %2'));
+    expect(places.last, ('main', 2));
+    await twoFingerSwipe(tester, const Offset(0, 150)); // up from %2 → %1
+    expect(places.last, ('main', 1));
+  });
+
+  testWidgets('a remembered pane that is gone falls back to the active one', (tester) async {
+    final places = <(String, int)>[];
+    final cmds = await pumpScreen(tester, initialPane: 42, onPlace: (s, p) => places.add((s, p)));
+    expect(cmds.where((c) => c.startsWith('select-pane')), isEmpty);
+    expect(places.last, ('main', 0));
   });
 
   testWidgets('swipe toward an edge without neighbour selects nothing', (tester) async {

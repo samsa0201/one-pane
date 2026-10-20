@@ -84,12 +84,33 @@ class HostStore {
     await _write((await load()).where((h) => h.id != id).toList());
     await _secure.delete(key: 'pw:$id');
     await _secure.delete(key: 'key:$id');
-    (await SharedPreferences.getInstance()).remove('hostkey:$id');
+    final prefs = await SharedPreferences.getInstance();
+    prefs.remove('hostkey:$id');
+    prefs.remove('place:$id');
   }
 
   Future<void> _write(List<HostConfig> hosts) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_key, jsonEncode([for (final h in hosts) h.toJson()]));
+  }
+
+  /// Where the user was on host [id]: (session, pane id).
+  Future<(String, int)?> lastPlace(String id) async {
+    final v = (await SharedPreferences.getInstance()).getString('place:$id')?.split('\t');
+    if (v case [final s, final p] when int.tryParse(p) != null) return (s, int.parse(p));
+    return null;
+  }
+
+  Future<void> setPlace(String id, String session, int pane) async =>
+      (await SharedPreferences.getInstance()).setString('place:$id', '$session\t$pane');
+
+  /// Host whose pane screen was open when the app last went away (reopened on start); null after the
+  /// user left it.
+  Future<String?> openHost() async => (await SharedPreferences.getInstance()).getString('openHost');
+
+  Future<void> setOpenHost(String? id) async {
+    final prefs = await SharedPreferences.getInstance();
+    id == null ? await prefs.remove('openHost') : await prefs.setString('openHost', id);
   }
 
   Future<void> _writeSecret(String key, String? value) => value == null || value.isEmpty
@@ -99,9 +120,10 @@ class HostStore {
 
 String shellQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
 
-/// Connects over SSH and attaches tmux in control mode (no PTY).
+/// Connects over SSH and attaches tmux in control mode (no PTY): to [session] if it still exists
+/// (where the user was), else the host's own session (created if missing).
 /// Host key: trust on first use, stored per host id; a changed key is rejected.
-Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h) async {
+Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h, {String? session}) async {
   final prefs = await SharedPreferences.getInstance();
   final socket = await SSHSocket.connect(h.host, h.port, timeout: const Duration(seconds: 10));
   final pem = h.privateKeyPem;
@@ -124,14 +146,18 @@ Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h) async {
   );
   try {
     await ssh.authenticated;
-    final session = await ssh.execute('${h.tmuxCmd} -C new-session -A -s ${shellQuote(h.session)}');
+    final home = '${h.tmuxCmd} -C new-session -A -s ${shellQuote(h.session)}';
+    final exec = await ssh.execute(session == null || session == h.session
+        ? home
+        : 'if ${h.tmuxCmd} has-session -t ${shellQuote('=$session')} 2>/dev/null; '
+            'then exec ${h.tmuxCmd} -C attach-session -t ${shellQuote('=$session')}; else exec $home; fi');
     final stderr = StringBuffer();
-    session.stderr.listen((b) => stderr.write(utf8.decode(b, allowMalformed: true)));
-    final tmux = TmuxClient(session.stdout, (data) => session.stdin.add(utf8.encode(data)));
+    exec.stderr.listen((b) => stderr.write(utf8.decode(b, allowMalformed: true)));
+    final tmux = TmuxClient(exec.stdout, (data) => exec.stdin.add(utf8.encode(data)));
     // If tmux exits before answering (e.g. "tmux: command not found"), surface its stderr.
-    final exited = session.done.then<List<String>>((_) async {
+    final exited = exec.done.then<List<String>>((_) async {
       await Future<void>.delayed(const Duration(milliseconds: 100)); // let stderr drain
-      throw Exception('tmux exited (code ${session.exitCode}): ${stderr.toString().trim()}');
+      throw Exception('tmux exited (code ${exec.exitCode}): ${stderr.toString().trim()}');
     });
     // Probe only; the client size policy (ignore-size or -C) is the pane screen's (phone/desk mode).
     await Future.any([tmux.cmd("display -p '#{version}'"), exited])

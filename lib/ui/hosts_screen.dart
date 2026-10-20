@@ -17,7 +17,12 @@ class _HostsScreenState extends State<HostsScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
+    _load().then((_) async {
+      // The app went away while a pane was open: go back there.
+      final open = await _store.openHost();
+      final h = _hosts.where((h) => h.id == open).firstOrNull;
+      if (h != null && mounted) _connect(h);
+    });
   }
 
   Future<void> _load() async {
@@ -59,16 +64,27 @@ class _HostsScreenState extends State<HostsScreen> {
     final messenger = ScaffoldMessenger.of(context);
     try {
       await _store.loadSecrets(h);
-      final (ssh, tmux) = await connectTmux(h);
+      final place = await _store.lastPlace(h.id); // where the user was last time
+      final (ssh, tmux) = await connectTmux(h, session: place?.$1);
       if (!mounted) {
         ssh.close();
         return;
       }
+      await _store.setOpenHost(h.id);
+      if (!mounted) return;
       await Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => PaneScreen(
-              ssh: ssh, client: tmux, session: h.session, reconnect: () => connectTmux(h))),
+        MaterialPageRoute(
+            builder: (_) => PaneScreen(
+                  ssh: ssh,
+                  client: tmux,
+                  session: place?.$1 ?? h.session,
+                  initialPane: place?.$2,
+                  onPlace: (s, p) => _store.setPlace(h.id, s, p),
+                  reconnect: () async => connectTmux(h, session: (await _store.lastPlace(h.id))?.$1),
+                )),
       );
+      await _store.setOpenHost(null); // left on purpose: start on the host list next time
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Connect failed: $e')));
     } finally {

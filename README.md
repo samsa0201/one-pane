@@ -18,6 +18,13 @@ Host list → **+** → host, port, user, password and/or private key (PEM / Ope
 (default `tmux`), session (default `main`, created if missing). Secrets are kept in Android
 Keystore-backed secure storage. Host key: trusted on first use, a changed key is refused.
 
+Reopening: the app remembers the session and pane per host; if it went away while a pane was open
+(swiped away, killed), the next start reconnects straight there. Leaving with back starts on the
+host list next time.
+
+Fish: set `set -U fish_handle_reflow 0` on the server; with 1 (the default) fish prints a fresh prompt
+every time tmux resizes the pane (each pane switch in phone mode), and the old ones pile up.
+
 ### Phone mode (default) vs desk mode
 - **Phone mode**: the phone tells tmux its own size (`refresh-client -C`) and zooms the pane you
   look at, so programs reflow to the phone (readable font, no horizontal scrolling). When you go back

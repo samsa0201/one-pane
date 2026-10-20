@@ -79,7 +79,20 @@ class PaneScreen extends StatefulWidget {
 
   /// Opens a fresh connection after a drop; null: a drop closes the screen.
   final Future<(SSHClient?, TmuxClient)> Function()? reconnect;
-  const PaneScreen({super.key, this.ssh, required this.client, required this.session, this.reconnect});
+
+  /// Pane to open on (where the user was last time), if it still exists.
+  final int? initialPane;
+
+  /// Told the (session, pane) shown whenever it changes, to reopen there next time.
+  final void Function(String session, int paneId)? onPlace;
+  const PaneScreen(
+      {super.key,
+      this.ssh,
+      required this.client,
+      required this.session,
+      this.reconnect,
+      this.initialPane,
+      this.onPlace});
 
   @override
   State<PaneScreen> createState() => _PaneScreenState();
@@ -90,6 +103,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   late SSHClient? _ssh = widget.ssh;
 
   late String _session = widget.session;
+  late int? _initialPane = widget.initialPane;
+  (String, int)? _placed;
   List<WindowInfo> _windows = [];
   int? _winId, _paneId;
   bool _follow = true, _jumpToActive = false, _exited = false;
@@ -440,14 +455,19 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _loadCommands();
     final before = (_winId, _paneId);
     final resized = <MapEntry<int, _Pane>>[];
+    final want = _initialPane; // first load only: where the user was
+    _initialPane = null;
+    final wantWin = want == null ? null : windows.where((w) => w.panes.any((p) => p.id == want)).firstOrNull;
     setState(() {
       _windows = windows;
       final active = windows.where((w) => w.active).firstOrNull ?? windows.first;
       final oldWin = _winId;
       if (_winId == null || _window == null || (_follow && !keepIds) || _jumpToActive) _winId = active.id;
       _jumpToActive = false;
+      if (wantWin != null) _winId = wantWin.id;
       final win = _window!;
       if (_winId != oldWin || _rect == null) _paneId = win.activePane;
+      if (wantWin != null) _paneId = want;
 
       final alive = {for (final w in windows) for (final p in w.panes) p.id: p};
       _panes.removeWhere((id, p) {
@@ -477,7 +497,12 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     for (final e in resized) {
       _seed(e.key, e.value, reset: true);
     }
+    if (wantWin != null) {
+      _run(client.selectWindow(wantWin.id));
+      _run(client.selectPane(want!, keepZoom: _phone));
+    }
     _refreshModes();
+    _remember();
     if ((_winId, _paneId) != before) {
       _keepZoomed();
       _wakeHints();
@@ -738,6 +763,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     _keepZoomed();
     _wakeHints();
     WidgetsBinding.instance.addPostFrameCallback((_) => _refreshModes());
+    _remember();
+  }
+
+  void _remember() {
+    final id = _paneId;
+    if (id == null || _placed == (_session, id)) return;
+    _placed = (_session, id);
+    widget.onPlace?.call(_session, id);
   }
 
   void _move(Dir d) {
