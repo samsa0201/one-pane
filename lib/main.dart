@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'ssh/connection.dart';
+import 'ui/glass.dart';
 import 'ui/hosts_screen.dart';
 
 // Debug-only: `--dart-define=POCKET_SEED=<base64 json of HostConfig + "key">` adds a host on first run,
@@ -19,6 +20,7 @@ Future<void> main() async {
       await store.save(HostConfig.fromJson(j)..privateKeyPem = j['key'] as String?);
     }
   }
+  await loadGlassPref();
   runApp(const MyApp());
 }
 
@@ -32,10 +34,14 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         colorSchemeSeed: const Color(0xFF4FC3F7),
+        // Screens are see-through: the ambient (and glass over it) is the background everywhere.
+        scaffoldBackgroundColor: Colors.transparent,
+        appBarTheme: const AppBarTheme(backgroundColor: Colors.transparent, surfaceTintColor: Colors.transparent),
         bottomSheetTheme: const BottomSheetThemeData(showDragHandle: true),
         snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
         listTileTheme: const ListTileThemeData(selectedTileColor: Color(0x224FC3F7)),
       ),
+      builder: (context, child) => Stack(fit: StackFit.expand, children: [const Ambient(), child!]),
       home: const HostsScreen(),
     );
   }

@@ -28,6 +28,10 @@ tap a host to connect straight there, tap the header for the host list.
 Fish: set `set -U fish_handle_reflow 0` on the server; with 1 (the default) fish prints a fresh prompt
 every time tmux resizes the pane (each pane switch in phone mode), and the old ones pile up.
 
+Look: "liquid glass" (frosted panels over a soft colour ambient: the bottom dock, sheets, host
+cards, joystick, pills). **Glass effects** (sessions sheet, or the blur icon on the host list) turns
+the backdrop blur off for slower phones: same layout, opaque panels.
+
 ### Phone mode (default) vs desk mode
 - **Phone mode**: the phone tells tmux its own size (`refresh-client -C`) and zooms the pane you
   look at, so programs reflow to the phone (readable font, no horizontal scrolling). When you go back

@@ -14,13 +14,13 @@ import 'package:xterm/xterm.dart';
 import '../tmux/control.dart';
 import '../tmux/layout.dart';
 import 'gestures.dart';
+import 'glass.dart';
 import 'ime_input.dart';
 import 'joystick.dart';
 import 'term_filter.dart';
 import 'minimap.dart';
 import 'overview.dart';
 
-const _bar = Color(0xFF1A1C1E); // window bar and extra keys
 
 /// Terminal text: bundled Hack Nerd Font Mono (icons in nvim, prompts), then CJK / emoji fallbacks.
 TerminalStyle _termStyle(double size) =>
@@ -1023,9 +1023,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   // ---------- sheets ----------
 
   void _sheet() {
-    showModalBottomSheet<void>(
+    showGlassSheet<void>(
       context: context,
-      isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) => SafeArea(
           child: FutureBuilder<List<SessionInfo>>(
@@ -1126,6 +1125,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   SharedPreferences.getInstance().then((p) => p.setBool(_joystickPref, v)).catchError((_) => true);
                 },
               ),
+              SwitchListTile(
+                title: const Text('Glass effects'),
+                subtitle: const Text('Frosted, see-through panels. Off: plain panels, lighter on the GPU'),
+                value: glassEffects.value,
+                onChanged: (v) {
+                  setGlassEffects(v);
+                  setSheet(() {});
+                },
+              ),
             ]),
           ),
         ),
@@ -1157,7 +1165,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       _run(f());
     }
 
-    showModalBottomSheet<void>(
+    showGlassSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
         child: Wrap(children: [
@@ -1191,14 +1199,18 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
       body: SafeArea(
         child: Stack(fit: StackFit.expand, children: [
           Column(children: [
-            // Window bar at the bottom, next to the thumb; the terminal gets the top of the screen.
+            // Window bar + keys: one glass dock at the bottom, next to the thumb.
             Expanded(child: _terminalArea()),
-            _topBar(),
-            _extraKeys(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+              child: Glass(
+                radius: const BorderRadius.all(Radius.circular(26)),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [_topBar(), _extraKeys()]),
+              ),
+            ),
           ]),
           if (_scrubFrom != null) _scrubOverlay(),
         ]),
@@ -1224,7 +1236,6 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       child: Container(
         height: 52,
         padding: const EdgeInsets.only(left: 12, right: 4),
-        decoration: const BoxDecoration(color: _bar, border: Border(top: BorderSide(color: Colors.white10))),
         child: Row(children: [
           Expanded(
             child: Column(
@@ -1354,6 +1365,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                         hardwareKeyboardOnly: true,
                         textScaler: TextScaler.noScaling,
                         textStyle: _termStyle(font),
+                        theme: terminalTheme,
                       ),
                     ),
                   ),
@@ -1443,7 +1455,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   Widget _historyView(Terminal t, double font) => Stack(children: [
         Positioned.fill(
           child: ColoredBox(
-            color: Colors.black,
+            color: const Color(0xF20A0C11),
             child: MediaQuery.removePadding(
               context: context,
               removeTop: true,
@@ -1470,6 +1482,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                     scrollController: _histScroll,
                     textScaler: TextScaler.noScaling,
                     textStyle: _termStyle(font),
+                    theme: terminalTheme,
                   ),
                 ),
               ),
@@ -1536,14 +1549,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     Widget btn(String label, VoidCallback onTap, {bool on = false}) => Padding(
           padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
           child: Material(
-            color: on ? accent : Colors.white.withValues(alpha: 0.07),
-            borderRadius: BorderRadius.circular(6),
+            color: on ? accent : Colors.white.withValues(alpha: 0.09),
+            borderRadius: BorderRadius.circular(12),
             child: InkWell(
               onTap: () {
                 HapticFeedback.selectionClick();
                 onTap();
               },
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(12),
               child: Container(
                 constraints: const BoxConstraints(minWidth: 42),
                 height: 38,
@@ -1559,11 +1572,11 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
           ),
         );
     const gap = SizedBox(width: 8);
-    return Container(
-      decoration: const BoxDecoration(color: _bar, border: Border(top: BorderSide(color: Colors.white10))),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 6),
         child: Row(children: [
           btn('Esc', () => _key(TerminalKey.escape)),
           btn('Tab', () => _key(TerminalKey.tab)),
@@ -1605,20 +1618,20 @@ class _Pill extends StatelessWidget {
   const _Pill(this.text, {this.progress = false});
 
   @override
-  Widget build(BuildContext context) => Container(
-        margin: const EdgeInsets.all(6),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: const Color(0xCC1A1C1E),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white12),
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.all(6),
+        child: Glass(
+          radius: const BorderRadius.all(Radius.circular(14)),
+          blur: 12,
+          strength: 0.8,
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (progress) ...[
+              const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
+              const SizedBox(width: 6),
+            ],
+            Text(text, style: const TextStyle(fontSize: 12, color: Colors.white)),
+          ]),
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (progress) ...[
-            const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
-            const SizedBox(width: 6),
-          ],
-          Text(text, style: const TextStyle(fontSize: 12, color: Colors.white70)),
-        ]),
       );
 }

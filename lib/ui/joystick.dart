@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../tmux/layout.dart';
+import 'glass.dart';
 import 'minimap.dart' show accent;
 
 /// Direction the knob points to (literal: pushed right → right), null inside the dead zone.
@@ -105,15 +106,17 @@ class _JoystickState extends State<Joystick> {
   Widget build(BuildContext context) {
     final color = _switch ? _switchColor : accent;
     Widget chevron(Dir d, Alignment a, IconData icon) => Align(
-          alignment: a,
-          child: Icon(icon,
-              size: 18,
-              color: _dir == d
-                  ? color
-                  : _switch || widget.available.contains(d)
-                      ? Colors.white70
-                      : Colors.white12),
-        );
+      alignment: a,
+      child: Icon(
+        icon,
+        size: 18,
+        color: _dir == d
+            ? color
+            : _switch || widget.available.contains(d)
+            ? Colors.white70
+            : Colors.white12,
+      ),
+    );
     final label = !_switch || _dir == null ? null : (_dir == Dir.left || _dir == Dir.right ? 'W' : 'S');
     return Listener(
       onPointerDown: _down,
@@ -143,40 +146,53 @@ class _JoystickState extends State<Joystick> {
         child: AnimatedScale(
           scale: _moving ? 1.15 : 1,
           duration: const Duration(milliseconds: 120),
-          child: Container(
-            width: _size,
-            height: _size,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(0x991A1C1E),
-              border: Border.all(color: _moving || _switch ? color : Colors.white24),
-            ),
-            child: Stack(children: [
-              chevron(Dir.up, Alignment.topCenter, Icons.keyboard_arrow_up),
-              chevron(Dir.down, Alignment.bottomCenter, Icons.keyboard_arrow_down),
-              chevron(Dir.left, Alignment.centerLeft, Icons.keyboard_arrow_left),
-              chevron(Dir.right, Alignment.centerRight, Icons.keyboard_arrow_right),
-              Center(
-                child: Transform.translate(
-                  offset: _knob,
-                  child: Container(
-                    width: _knobSize,
-                    height: _knobSize,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _dir == null
-                          ? (_switch ? _switchColor.withValues(alpha: 0.5) : Colors.white24)
-                          : color.withValues(alpha: 0.85),
-                    ),
-                    child: label == null
-                        ? null
-                        : Text(label,
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.black)),
-                  ),
-                ),
+          child: Glass(
+            radius: const BorderRadius.all(Radius.circular(_size / 2)),
+            blur: 14,
+            child: Container(
+              width: _size,
+              height: _size,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: _moving || _switch ? Border.all(color: color, width: 1.5) : null,
               ),
-            ]),
+              child: Stack(
+                children: [
+                  chevron(Dir.up, Alignment.topCenter, Icons.keyboard_arrow_up),
+                  chevron(Dir.down, Alignment.bottomCenter, Icons.keyboard_arrow_down),
+                  chevron(Dir.left, Alignment.centerLeft, Icons.keyboard_arrow_left),
+                  chevron(Dir.right, Alignment.centerRight, Icons.keyboard_arrow_right),
+                  Center(
+                    child: Transform.translate(
+                      offset: _knob,
+                      child: Container(
+                        width: _knobSize,
+                        height: _knobSize,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _dir == null
+                              ? (_switch
+                                    ? _switchColor.withValues(alpha: 0.5)
+                                    : Colors.white.withValues(alpha: 0.35))
+                              : color.withValues(alpha: 0.85),
+                        ),
+                        child: label == null
+                            ? null
+                            : Text(
+                                label,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.black,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),

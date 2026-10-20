@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../quick_access.dart';
 import '../ssh/connection.dart';
+import 'glass.dart';
+import 'minimap.dart' show accent;
 import 'pane_screen.dart';
 
 class HostsScreen extends StatefulWidget {
@@ -95,14 +97,15 @@ class _HostsScreenState extends State<HostsScreen> {
       await Navigator.push(
         context,
         MaterialPageRoute(
-            builder: (_) => PaneScreen(
-                  ssh: ssh,
-                  client: tmux,
-                  session: place?.$1 ?? h.session,
-                  initialPane: place?.$2,
-                  onPlace: (s, p) => _store.setPlace(h.id, s, p),
-                  reconnect: () async => connectTmux(h, session: (await _store.lastPlace(h.id))?.$1),
-                )),
+          builder: (_) => PaneScreen(
+            ssh: ssh,
+            client: tmux,
+            session: place?.$1 ?? h.session,
+            initialPane: place?.$2,
+            onPlace: (s, p) => _store.setPlace(h.id, s, p),
+            reconnect: () async => connectTmux(h, session: (await _store.lastPlace(h.id))?.$1),
+          ),
+        ),
       );
       await _store.setOpenHost(null); // left on purpose: start on the host list next time
     } catch (e) {
@@ -116,57 +119,107 @@ class _HostsScreenState extends State<HostsScreen> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('tmux pocket')),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _edit,
-        icon: const Icon(Icons.add),
-        label: const Text('Host'),
+      appBar: AppBar(
+        title: const Text('tmux pocket', style: TextStyle(fontWeight: FontWeight.w600)),
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: glassEffects,
+            builder: (context, on, _) => IconButton(
+              tooltip: on ? 'Glass effects on' : 'Glass effects off',
+              icon: Icon(on ? Icons.blur_on : Icons.blur_off),
+              onPressed: () => setGlassEffects(!on),
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: Glass(
+        radius: const BorderRadius.all(Radius.circular(28)),
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            onTap: _edit,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 22, vertical: 16),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.add),
+                  SizedBox(width: 8),
+                  Text('Host', style: TextStyle(fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
       body: _hosts.isEmpty
           ? Center(
               child: Padding(
                 padding: const EdgeInsets.all(32),
-                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.terminal, size: 56, color: scheme.primary),
-                  const SizedBox(height: 16),
-                  Text('No hosts yet', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
-                  Text('Add an SSH host; tmux is attached in control mode, one pane at a time.',
-                      textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
-                ]),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.terminal, size: 56, color: scheme.primary),
+                    const SizedBox(height: 16),
+                    Text('No hosts yet', style: Theme.of(context).textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Add an SSH host; tmux is attached in control mode, one pane at a time.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
               ),
             )
-          : ListView(padding: const EdgeInsets.fromLTRB(12, 8, 12, 88), children: [
-              for (final h in _hosts)
-                Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  clipBehavior: Clip.antiAlias,
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.only(left: 16, right: 4),
-                    leading: CircleAvatar(
-                      backgroundColor: scheme.primaryContainer,
-                      foregroundColor: scheme.onPrimaryContainer,
-                      child: _connecting == h.id
-                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                          : Text(h.name.isEmpty ? '?' : h.name.characters.first.toUpperCase()),
-                    ),
-                    title: Text(h.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text(
-                      _connecting == h.id ? 'Connecting…' : '${h.user}@${h.host}:${h.port} · ${h.session}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () => _connect(h),
-                    trailing: PopupMenuButton<String>(
-                      onSelected: (v) => v == 'edit' ? _edit(h) : _delete(h),
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: 'edit', child: Text('Edit')),
-                        PopupMenuItem(value: 'delete', child: Text('Delete')),
-                      ],
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 88),
+              children: [
+                for (final h in _hosts)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 5),
+                    child: Glass(
+                      radius: const BorderRadius.all(Radius.circular(22)),
+                      child: Material(
+                        type: MaterialType.transparency,
+                        child: ListTile(
+                          shape: const RoundedRectangleBorder(
+                            borderRadius: BorderRadius.all(Radius.circular(22)),
+                          ),
+                          contentPadding: const EdgeInsets.only(left: 16, right: 4),
+                          leading: CircleAvatar(
+                            backgroundColor: accent.withValues(alpha: 0.22),
+                            foregroundColor: accent,
+                            child: _connecting == h.id
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : Text(h.name.isEmpty ? '?' : h.name.characters.first.toUpperCase()),
+                          ),
+                          title: Text(h.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(
+                            _connecting == h.id
+                                ? 'Connecting…'
+                                : '${h.user}@${h.host}:${h.port} · ${h.session}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () => _connect(h),
+                          trailing: PopupMenuButton<String>(
+                            onSelected: (v) => v == 'edit' ? _edit(h) : _delete(h),
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(value: 'edit', child: Text('Edit')),
+                              PopupMenuItem(value: 'delete', child: Text('Delete')),
+                            ],
+                          ),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-            ]),
+              ],
+            ),
     );
   }
 }
@@ -213,20 +266,25 @@ class _HostFormState extends State<HostForm> {
 
   @override
   Widget build(BuildContext context) {
-    Widget field(TextEditingController c, String label,
-            {String? Function(String?)? validator, bool obscure = false, int maxLines = 1, TextInputType? type}) =>
-        Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: TextFormField(
-            controller: c,
-            validator: validator,
-            obscureText: obscure,
-            maxLines: maxLines,
-            keyboardType: type,
-            autocorrect: false,
-            decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
-          ),
-        );
+    Widget field(
+      TextEditingController c,
+      String label, {
+      String? Function(String?)? validator,
+      bool obscure = false,
+      int maxLines = 1,
+      TextInputType? type,
+    }) => Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: TextFormField(
+        controller: c,
+        validator: validator,
+        obscureText: obscure,
+        maxLines: maxLines,
+        keyboardType: type,
+        autocorrect: false,
+        decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
+      ),
+    );
     return Scaffold(
       appBar: AppBar(
         title: Text(h == null ? 'Add host' : 'Edit host'),
@@ -234,18 +292,24 @@ class _HostFormState extends State<HostForm> {
       ),
       body: Form(
         key: _form,
-        child: ListView(padding: const EdgeInsets.all(16), children: [
-          field(_name, 'Name'),
-          field(_host, 'Host', validator: _required, type: TextInputType.url),
-          field(_port, 'Port',
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            field(_name, 'Name'),
+            field(_host, 'Host', validator: _required, type: TextInputType.url),
+            field(
+              _port,
+              'Port',
               type: TextInputType.number,
-              validator: (v) => (int.tryParse(v ?? '') ?? 0) > 0 ? null : 'Port number'),
-          field(_user, 'User', validator: _required),
-          field(_password, 'Password', obscure: true),
-          field(_key, 'Private key (PEM)', maxLines: 6),
-          field(_tmux, 'tmux command'),
-          field(_session, 'Session'),
-        ]),
+              validator: (v) => (int.tryParse(v ?? '') ?? 0) > 0 ? null : 'Port number',
+            ),
+            field(_user, 'User', validator: _required),
+            field(_password, 'Password', obscure: true),
+            field(_key, 'Private key (PEM)', maxLines: 6),
+            field(_tmux, 'tmux command'),
+            field(_session, 'Session'),
+          ],
+        ),
       ),
     );
   }

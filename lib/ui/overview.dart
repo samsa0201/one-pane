@@ -3,6 +3,7 @@ import 'package:xterm/xterm.dart';
 
 import '../tmux/control.dart';
 import '../tmux/layout.dart';
+import 'glass.dart';
 import 'minimap.dart';
 
 /// What the user picked in the overview / session map. Exactly one field is set.
@@ -122,12 +123,13 @@ class _PaneThumb extends StatelessWidget {
     final n = ((height - 20) / lineH).floor().clamp(0, 200);
     final text = terminal == null ? '' : tailLines(terminal!, n).join('\n');
     return Container(
-      padding: const EdgeInsets.all(3),
+      padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
+      // Smoked glass without a backdrop blur (several live thumbnails): dark tint + rim.
       decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: current ? accent : Colors.white24, width: current ? 2 : 1),
-        boxShadow: current ? [BoxShadow(color: accent.withValues(alpha: 0.35), blurRadius: 8)] : null,
+        color: const Color(0xB30A0C11),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: current ? accent : Colors.white24, width: current ? 1.5 : 1),
+        boxShadow: current ? [BoxShadow(color: accent.withValues(alpha: 0.35), blurRadius: 14)] : null,
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text('%$id',
@@ -176,14 +178,17 @@ class _SessionMapState extends State<SessionMap> {
     }();
   }
 
-  Widget _card(String title, String subtitle, bool active, OverviewResult r, {List<PaneRect>? panes, int? activePane}) => Card(
-        color: active ? accent.withValues(alpha: 0.18) : null,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: BorderSide(color: active ? accent : Colors.white12),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
+  Widget _card(String title, String subtitle, bool active, OverviewResult r, {List<PaneRect>? panes, int? activePane}) => Glass(
+        radius: const BorderRadius.all(Radius.circular(20)),
+        strength: active ? 1.6 : 1,
+        child: Material(
+          type: MaterialType.transparency,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: active ? const BorderSide(color: accent, width: 1.5) : BorderSide.none,
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
           onTap: () => Navigator.pop(context, r),
           child: Padding(
             padding: const EdgeInsets.all(8),
@@ -199,6 +204,7 @@ class _SessionMapState extends State<SessionMap> {
               Text(subtitle, style: const TextStyle(fontSize: 11, color: Colors.white54)),
             ]),
           ),
+        ),
         ),
       );
 
