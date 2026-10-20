@@ -12,6 +12,7 @@ import 'package:xterm/xterm.dart';
 import '../tmux/control.dart';
 import '../tmux/layout.dart';
 import 'gestures.dart';
+import 'ime_input.dart';
 import 'minimap.dart';
 import 'overview.dart';
 
@@ -895,17 +896,13 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    // Height the keyboard takes from the terminal area (the Scaffold shrinks the body by the inset,
-    // SafeArea gives back the nav-bar padding the keyboard covers). Phone mode sizes tmux WITHOUT it,
-    // so showing the keyboard does not resize the pane; the view just scrolls.
-    final kb = max(0.0, MediaQuery.viewInsetsOf(context).bottom - MediaQuery.viewPaddingOf(context).bottom);
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Stack(fit: StackFit.expand, children: [
           Column(children: [
             _topBar(),
-            Expanded(child: _terminalArea(kb)),
+            Expanded(child: _terminalArea()),
             _extraKeys(),
           ]),
           if (_scrubFrom != null) _scrubOverlay(),
@@ -968,8 +965,10 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     );
   }
 
-  Widget _terminalArea(double kb) => LayoutBuilder(builder: (context, c) {
-        if (_phone) _fitClient(fitCells(Size(c.maxWidth, c.maxHeight + kb), _cell(_font)));
+  // Phone mode sizes tmux to what is visible, keyboard included: with a taller pane under the keyboard
+  // the view sat at the pane's bottom while the prompt was at its top (blank screen while typing).
+  Widget _terminalArea() => LayoutBuilder(builder: (context, c) {
+        if (_phone) _fitClient(fitCells(Size(c.maxWidth, c.maxHeight), _cell(_font)));
         final r = _termRect;
         final p = _panes[_paneId];
         if (r == null || p == null) return const Center(child: CircularProgressIndicator());
@@ -990,14 +989,21 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                 removeBottom: true,
                 removeLeft: true,
                 removeRight: true,
-                child: TerminalView(
-                  p.term,
-                  focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
-                  scrollController: p.scroll,
-                  autoResize: false,
-                  deleteDetection: true,
-                  textScaler: TextScaler.noScaling,
-                  textStyle: TerminalStyle(fontSize: font),
+                // Soft keyboard through ImeInput (Vietnamese IMEs); TerminalView only takes hardware keys.
+                child: ImeInput(
+                  focusNode: p.focus,
+                  onInsert: p.term.textInput,
+                  onBackspace: () => p.term.keyInput(TerminalKey.backspace),
+                  onEnter: () => p.term.keyInput(TerminalKey.enter),
+                  child: TerminalView(
+                    p.term,
+                    focusNode: p.focus, // no autofocus: keyboard only on tap / keyboard button
+                    scrollController: p.scroll,
+                    autoResize: false,
+                    hardwareKeyboardOnly: true,
+                    textScaler: TextScaler.noScaling,
+                    textStyle: TerminalStyle(fontSize: font),
+                  ),
                 ),
               ),
             ),
