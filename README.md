@@ -32,6 +32,10 @@ Look: "liquid glass" (frosted panels over a soft colour ambient: the bottom dock
 cards, joystick, pills). **Glass effects** (sessions sheet, or the blur icon on the host list) turns
 the backdrop blur off for slower phones: same layout, opaque panels.
 
+Terminal font (sessions sheet → Terminal font): Hack Nerd Font is built in; JetBrains Mono, Fira Code,
+Meslo LGS, Caskaydia Cove, Sauce Code Pro, Ubuntu Mono and Iosevka (Nerd Font Mono) are downloaded
+from the nerd-fonts v3.4.0 release when picked (regular + bold, 2–5 MB) and kept.
+
 ### Phone mode (default) vs desk mode
 - **Phone mode**: the phone tells tmux its own size (`refresh-client -C`) and zooms the pane you
   look at, so programs reflow to the phone (readable font, no horizontal scrolling). When you go back

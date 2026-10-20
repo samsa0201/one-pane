@@ -13,6 +13,7 @@ import 'package:xterm/xterm.dart';
 
 import '../tmux/control.dart';
 import '../tmux/layout.dart';
+import 'fonts.dart';
 import 'gestures.dart';
 import 'glass.dart';
 import 'ime_input.dart';
@@ -22,9 +23,10 @@ import 'minimap.dart';
 import 'overview.dart';
 
 
-/// Terminal text: bundled Hack Nerd Font Mono (icons in nvim, prompts), then CJK / emoji fallbacks.
+/// Terminal text: the chosen Nerd Font (Hack bundled; icons in nvim, prompts), then symbol / CJK /
+/// emoji fallbacks.
 TerminalStyle _termStyle(double size) =>
-    TerminalStyle(fontSize: size, fontFamily: 'HackNerdFontMono', fontFamilyFallback: const [
+    TerminalStyle(fontSize: size, fontFamily: termFont.value, fontFamilyFallback: const [
       'PocketSymbols2', // ⏵ ⏺ ✻ ✓ ☐ … (Claude Code's UI)
       'PocketSymbols', // ⎿ ⎯
       'Noto Sans Mono CJK SC',
@@ -185,10 +187,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   Size _cell(double font) => _cells[font] ??= terminalCellSize(_termStyle(font));
 
+  /// New font, new cell size: phone mode re-fits tmux on the next build.
+  void _fontChanged() => setState(_cells.clear);
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    termFont.addListener(_fontChanged);
     _attach();
     _reload();
     // pane_current_command changes without a tmux notification
@@ -261,6 +267,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    termFont.removeListener(_fontChanged);
     _histScroll.dispose();
     _sub.cancel();
     _reloadTimer?.cancel();
@@ -1127,6 +1134,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   SharedPreferences.getInstance().then((p) => p.setBool(_joystickPref, v)).catchError((_) => true);
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.font_download_outlined),
+                title: const Text('Terminal font'),
+                subtitle: Text(termFonts.firstWhere((f) => f.family == termFont.value).name),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _fontPicker();
+                },
+              ),
               SwitchListTile(
                 title: const Text('Glass effects'),
                 subtitle: const Text('Frosted, see-through panels. Off: plain panels, lighter on the GPU'),
@@ -1138,6 +1154,58 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
               ),
             ]),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Nerd Fonts: Hack is bundled, the others download once (about 2–5 MB each) when picked.
+  void _fontPicker() {
+    String? busy;
+    double progress = 0;
+    showGlassSheet<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: ListView(shrinkWrap: true, children: [
+            const _Header('Terminal font'),
+            for (final f in termFonts)
+              FutureBuilder<bool>(
+                future: fontReady(f),
+                builder: (ctx, ready) => ListTile(
+                  title: Text(f.name, style: ready.data == true ? TextStyle(fontFamily: f.family) : null),
+                  subtitle: Text(f.bundled ? 'built in' : (ready.data == true ? 'downloaded' : 'tap to download')),
+                  selected: f.family == termFont.value,
+                  trailing: busy == f.family
+                      ? SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(value: progress > 0 ? progress : null, strokeWidth: 2))
+                      : f.family == termFont.value
+                          ? const Icon(Icons.check)
+                          : ready.data == false
+                              ? const Icon(Icons.download_outlined)
+                              : null,
+                  onTap: busy != null
+                      ? null
+                      : () async {
+                          setSheet(() {
+                            busy = f.family;
+                            progress = 0;
+                          });
+                          final messenger = ScaffoldMessenger.of(context);
+                          try {
+                            await useFont(f, onProgress: (p) {
+                              if (ctx.mounted) setSheet(() => progress = p);
+                            });
+                          } catch (e) {
+                            messenger.showSnackBar(SnackBar(content: Text('${f.name}: $e')));
+                          }
+                          if (ctx.mounted) setSheet(() => busy = null);
+                        },
+                ),
+              ),
+          ]),
         ),
       ),
     );

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'ssh/connection.dart';
+import 'ui/fonts.dart';
 import 'ui/glass.dart';
 import 'ui/hosts_screen.dart';
 
@@ -21,6 +22,7 @@ Future<void> main() async {
     }
   }
   await loadGlassPref();
+  await loadFontPref();
   runApp(const MyApp());
 }
 
