@@ -5,6 +5,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../quick_access.dart';
 import '../tmux/control.dart';
 
 class HostConfig {
@@ -92,6 +93,7 @@ class HostStore {
   Future<void> _write(List<HostConfig> hosts) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_key, jsonEncode([for (final h in hosts) h.toJson()]));
+    QuickAccess.refresh();
   }
 
   /// Where the user was on host [id]: (session, pane id).
@@ -101,8 +103,10 @@ class HostStore {
     return null;
   }
 
-  Future<void> setPlace(String id, String session, int pane) async =>
-      (await SharedPreferences.getInstance()).setString('place:$id', '$session\t$pane');
+  Future<void> setPlace(String id, String session, int pane) async {
+    await (await SharedPreferences.getInstance()).setString('place:$id', '$session\t$pane');
+    QuickAccess.refresh();
+  }
 
   /// Host whose pane screen was open when the app last went away (reopened on start); null after the
   /// user left it.

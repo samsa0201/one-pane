@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../quick_access.dart';
 import '../ssh/connection.dart';
 import 'pane_screen.dart';
 
@@ -13,16 +14,32 @@ class _HostsScreenState extends State<HostsScreen> {
   final _store = HostStore();
   List<HostConfig> _hosts = [];
   String? _connecting; // host id
+  Future<void>? _session; // the running _open
 
   @override
   void initState() {
     super.initState();
+    QuickAccess.listen(_launch);
     _load().then((_) async {
+      final asked = await QuickAccess.initialHost(); // started from the home-screen widget
+      if (asked != null) return _launch(asked);
       // The app went away while a pane was open: go back there.
       final open = await _store.openHost();
       final h = _hosts.where((h) => h.id == open).firstOrNull;
       if (h != null && mounted) _connect(h);
     });
+  }
+
+  /// Home-screen widget tap: [id] '' = host list, else connect there (leaving another host's pane).
+  Future<void> _launch(String id) async {
+    if (!mounted || _connecting == id) return;
+    if (_connecting != null && ModalRoute.of(context)!.isCurrent) return; // still connecting elsewhere
+    Navigator.popUntil(context, (r) => r.isFirst);
+    await _session; // the left pane's cleanup is done
+    if (id.isEmpty || !mounted) return;
+    await _load();
+    final h = _hosts.where((h) => h.id == id).firstOrNull;
+    if (h != null && mounted) _connect(h);
   }
 
   Future<void> _load() async {
@@ -58,8 +75,11 @@ class _HostsScreenState extends State<HostsScreen> {
     _load();
   }
 
-  Future<void> _connect(HostConfig h) async {
-    if (_connecting != null) return;
+  void _connect(HostConfig h) {
+    if (_connecting == null) _session = _open(h);
+  }
+
+  Future<void> _open(HostConfig h) async {
     setState(() => _connecting = h.id);
     final messenger = ScaffoldMessenger.of(context);
     try {
