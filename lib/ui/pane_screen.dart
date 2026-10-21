@@ -1199,10 +1199,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                           w.name,
                           '${w.panes.length} pane${w.panes.length == 1 ? '' : 's'}${w.id == _winId ? ' · you are here' : ''}',
                           w.id == _winId,
-                          SizedBox(
-                              width: 34,
-                              height: 24,
-                              child: MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(34, 24))),
+                          w.panes.length < 2
+                              ? null
+                              : MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(34, 24)),
                           () => _selectWindow(w.id),
                         ),
                       InkWell(
@@ -1282,6 +1281,78 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         action: 'Kill')) {
       _run(client.killWindow(w.id));
     }
+  }
+
+  /// Tap the current window's tab: every window of the session as a list (many windows don't fit
+  /// the tab row). Hold a row for rename / kill.
+  void _windowList() {
+    showGlassSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(12, 4, 12, 12), children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+            child: Text.rich(
+              TextSpan(text: _session, children: [
+                TextSpan(
+                    text: '  ${_windows.length} window${_windows.length == 1 ? '' : 's'}',
+                    style: TextStyle(fontFamily: null, fontSize: 13, fontWeight: FontWeight.w400, color: Tone.muted)),
+              ]),
+              style: TextStyle(fontFamily: termFont.value, fontSize: 17, fontWeight: FontWeight.w600, color: Tone.text),
+            ),
+          ),
+          Group(color: Tone.raised.withValues(alpha: 0.75), children: [
+            for (final w in _windows)
+              InkWell(
+                onTap: () {
+                  Navigator.pop(ctx);
+                  if (w.id != _winId) _selectWindow(w.id);
+                },
+                onLongPress: () {
+                  Navigator.pop(ctx);
+                  _windowMenu(w);
+                },
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 56),
+                  color: w.id == _winId ? accent.withValues(alpha: 0.08) : null,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Row(children: [
+                    SizedBox(
+                        width: 28,
+                        child: Text('${w.index}',
+                            style: TextStyle(
+                                fontFamily: termFont.value, fontSize: 13, color: w.id == _winId ? accent : Tone.muted))),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(w.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontFamily: termFont.value,
+                                fontSize: 15,
+                                fontWeight: w.id == _winId ? FontWeight.w600 : FontWeight.w400,
+                                color: w.id == _winId ? accent : Tone.text)),
+                        Text(
+                            '${w.panes.length} pane${w.panes.length == 1 ? '' : 's'}'
+                            '${w.panes.map((p) => _commands[p.id]).whereType<String>().toSet().map((c) => ' · $c').join()}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12, color: Tone.muted)),
+                      ]),
+                    ),
+                    if (w.panes.length > 1) MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(34, 24)),
+                  ]),
+                ),
+              ),
+          ]),
+          const SizedBox(height: 10),
+          PillButton('New window', icon: Icons.add_rounded, primary: false, onPressed: () {
+            Navigator.pop(ctx);
+            _run(client.newWindow());
+          }),
+        ]),
+      ),
+    );
   }
 
   /// Long-press on a window tab.
@@ -1452,6 +1523,19 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   }
 
   double _barDx = 0;
+  final _currentTab = GlobalKey();
+  int? _tabShown; // window whose tab was last scrolled into view
+
+  void _showCurrentTab() {
+    if (_tabShown == _winId) return;
+    _tabShown = _winId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final c = _currentTab.currentContext;
+      if (c != null) {
+        Scrollable.ensureVisible(c, alignment: 0.5, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      }
+    });
+  }
 
   /// Link health: round circle under 150 ms, square under 400, diamond above (shape, not colour alone).
   Widget _linkDot() {
@@ -1472,6 +1556,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   /// Session chip, window tabs, minimap, keyboard. Swipe the row to step windows.
   Widget _contextRow() {
+    _showCurrentTab();
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       // Distance OR velocity: a slow drag that stops before lifting has ~0 velocity.
@@ -1515,12 +1600,15 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             ),
           ),
           const SizedBox(width: 6),
-          // Tabs share the row (no scrolling: a sideways swipe here steps windows).
+          // Tabs as wide as their names, scrolling sideways when they don't fit (many windows); the
+          // current one is kept in view. A swipe elsewhere on the row steps windows.
           Expanded(
-            child: Row(children: [
-              for (final w in _windows)
-                Flexible(
-                  child: Padding(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(children: [
+                for (final w in _windows)
+                  Padding(
+                    key: w.id == _winId ? _currentTab : null,
                     padding: const EdgeInsets.only(right: 2),
                     child: Material(
                       color: w.id == _winId ? accent.withValues(alpha: 0.14) : Colors.transparent,
@@ -1529,7 +1617,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                         borderRadius: BorderRadius.circular(8),
                         onTap: () {
                           HapticFeedback.selectionClick();
-                          if (w.id != _winId) _selectWindow(w.id);
+                          w.id == _winId ? _windowList() : _selectWindow(w.id);
                         },
                         onLongPress: () => _windowMenu(w),
                         child: Container(
@@ -1551,8 +1639,8 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                       ),
                     ),
                   ),
-                ),
-            ]),
+              ]),
+            ),
           ),
           const SizedBox(width: 6),
           MiniMap(

@@ -226,7 +226,7 @@ void main() {
 
   testWidgets('fling the top bar left goes to the next window', (tester) async {
     final cmds = await pumpScreen(tester, twoWindows: true);
-    await tester.fling(find.text('0 main'), const Offset(-200, 0), 1000);
+    await tester.fling(find.text('main'), const Offset(-200, 0), 1000); // the row outside the tabs
     await tester.pumpAndSettle();
     expect(cmds, contains('select-window -t @2'));
   });
@@ -352,6 +352,15 @@ void main() {
     await tester.tap(find.text('gs'));
     await tester.pump();
     expect(cmds, contains('send-keys -t %0 -H 67 73 0d'));
+  });
+
+  testWidgets('tapping the current window tab lists every window', (tester) async {
+    final cmds = await pumpScreen(tester, twoWindows: true);
+    await tester.tap(find.text('0 main'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('logs').last);
+    await tester.pumpAndSettle();
+    expect(cmds, contains('select-window -t @2'));
   });
 
   testWidgets('latency shows in the switcher', (tester) async {
