@@ -120,6 +120,20 @@ class HostStore {
     if (id != null) await prefs.setString('lastHost', id);
   }
 
+  /// The host key trusted for host [id]: (type, `SHA256:…` fingerprint), or null if none yet.
+  Future<(String, String)?> hostKey(String id) async {
+    final v = (await SharedPreferences.getInstance()).getString('hostkey:$id')?.split(' ');
+    if (v == null || v.length != 2) return null;
+    try {
+      return (v[0], utf8.decode(base64.decode(v[1])));
+    } catch (_) {
+      return (v[0], v[1]);
+    }
+  }
+
+  /// Forget the trusted host key: the next connection shows the fingerprint and asks again.
+  Future<void> forgetHostKey(String id) async => (await SharedPreferences.getInstance()).remove('hostkey:$id');
+
   /// The host opened most recently (the "Continue" card).
   Future<String?> lastHost() async => (await SharedPreferences.getInstance()).getString('lastHost');
 
@@ -128,12 +142,20 @@ class HostStore {
       : _secure.write(key: key, value: value);
 }
 
+/// The server's key was refused (not trusted, or changed): retrying will not help.
+class HostKeyError implements Exception {
+  final String message;
+  HostKeyError(this.message);
+  @override
+  String toString() => message;
+}
+
 String shellQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
 
 /// Connects over SSH and attaches tmux in control mode (no PTY): to [session] if it still exists
 /// (where the user was), else the host's own session (created if missing).
 /// Host key: trust on first use, stored per host id; a changed key is rejected.
-/// [trust]: asked about a host key seen for the first time (type, SHA256 fingerprint); null: trusted.
+/// [trust]: asked about a host key seen for the first time (type, SHA256 fingerprint); null: refused.
 Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h,
     {String? session, Future<bool> Function(String type, String fingerprint)? trust}) async {
   final prefs = await SharedPreferences.getInstance();
@@ -149,7 +171,7 @@ Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h,
       final fp = '$type ${base64.encode(fingerprint)}';
       final known = prefs.getString('hostkey:${h.id}');
       if (known == null) {
-        final ok = trust == null ? true : await trust(type, utf8.decode(fingerprint, allowMalformed: true));
+        final ok = trust != null && await trust(type, utf8.decode(fingerprint, allowMalformed: true));
         if (ok) await prefs.setString('hostkey:${h.id}', fp);
         if (!ok) keyError = 'Host key not trusted';
         return ok;
@@ -179,7 +201,7 @@ Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h,
     return (ssh, tmux);
   } catch (e) {
     ssh.close();
-    if (keyError != null) throw Exception(keyError);
+    if (keyError != null) throw HostKeyError(keyError!);
     rethrow;
   }
 }

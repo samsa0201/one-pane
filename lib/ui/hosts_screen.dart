@@ -171,7 +171,8 @@ class _HostsScreenState extends State<HostsScreen> {
             session: place?.$1 ?? h.session,
             initialPane: place?.$2,
             onPlace: (s, p) => _store.setPlace(h.id, s, p),
-            reconnect: () async => connectTmux(h, session: (await _store.lastPlace(h.id))?.$1),
+            reconnect: () async => connectTmux(h,
+                session: (await _store.lastPlace(h.id))?.$1, trust: (type, fp) => _trust(h, type, fp)),
           ),
         ),
       );

@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tmux_pocket/tmux/control.dart';
 import 'package:tmux_pocket/ui/joystick.dart';
+import 'package:tmux_pocket/ui/keys.dart';
 import 'package:tmux_pocket/ui/minimap.dart';
 import 'package:tmux_pocket/ui/pane_screen.dart';
 import 'package:tmux_pocket/ui/settings_screen.dart';
@@ -339,6 +340,20 @@ void main() {
     await tester.pump(const Duration(seconds: 20));
   });
 
+  testWidgets('custom key row: control key and snippet', (tester) async {
+    final cmds = await pumpScreen(tester);
+    keyPages.value = [
+      ['^D', snippetId('gs', 'gs\n')],
+    ];
+    await tester.pump();
+    await tester.tap(find.text('^D'));
+    await tester.pump();
+    expect(cmds, contains('send-keys -t %0 -H 04'));
+    await tester.tap(find.text('gs'));
+    await tester.pump();
+    expect(cmds, contains('send-keys -t %0 -H 67 73 0d'));
+  });
+
   testWidgets('latency shows in the switcher', (tester) async {
     await pumpScreen(tester);
     await tester.pump(const Duration(seconds: 5));
@@ -434,4 +449,5 @@ void resetSettings() {
   joystickOn.value = true;
   followActive.value = true;
   termFontSize.value = 13;
+  keyPages.value = defaultKeyPages;
 }

@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
+import '../ssh/connection.dart' show HostKeyError;
 import '../tmux/control.dart';
 import '../tmux/layout.dart';
 import 'fonts.dart';
@@ -19,6 +20,7 @@ import 'gestures.dart';
 import 'glass.dart';
 import 'ime_input.dart';
 import 'joystick.dart';
+import 'keys.dart';
 import 'term_filter.dart';
 import 'minimap.dart';
 import 'overview.dart';
@@ -140,6 +142,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   int _tries = 0; // reconnect attempts so far
   String? _why; // what dropped the connection
   String? _lostError; // reconnecting gave up: the card offers retry
+  bool _lostKey = false; // ...because the server's key was refused
   // Heartbeat: a no-op tmux command every 5 s; its round trip is the latency shown in the bar, no reply
   // in time = a dead connection (TCP can stay silent for minutes after a network change).
   Timer? _beatTimer;
@@ -220,6 +223,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     phoneMode.addListener(_phoneChanged);
     joystickOn.addListener(_settingsChanged);
     termPalette.addListener(_paletteChanged);
+    keyPages.addListener(_settingsChanged);
     termFontSize.addListener(_fontSizeChanged);
     _setPhone(phoneMode.value);
     SharedPreferences.getInstance().then((prefs) {
@@ -294,6 +298,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     phoneMode.removeListener(_phoneChanged);
     joystickOn.removeListener(_settingsChanged);
     termPalette.removeListener(_paletteChanged);
+    keyPages.removeListener(_settingsChanged);
     termFontSize.removeListener(_fontSizeChanged);
     _histScroll.dispose();
     _keysPage.dispose();
@@ -409,12 +414,14 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         return;
       } catch (e) {
         error = e;
+        if (e is HostKeyError) break; // a refused key stays refused
       }
     }
     if (mounted) {
       setState(() {
         _reconnecting = false;
         _lostError = '$error';
+        _lostKey = error is HostKeyError;
       });
     }
   }
@@ -1432,7 +1439,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                   if (kb) _whereStrip() else _contextRow(),
                   SizedBox(height: kb ? 4 : 8),
                   _keyRow(),
-                  if (!kb) _pageDots(),
+                  if (!kb && _keyPagesShown.length > 1) _pageDots(),
                 ]),
               ),
             ),
@@ -1881,35 +1888,51 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   final _keysPage = PageController();
   int _keysPageAt = 0;
 
-  /// Eight equal keys a page; swipe sideways for the next page. Arrows repeat while held.
+  static const _termKeys = {
+    'esc': TerminalKey.escape, 'tab': TerminalKey.tab, 'left': TerminalKey.arrowLeft, //
+    'down': TerminalKey.arrowDown, 'up': TerminalKey.arrowUp, 'right': TerminalKey.arrowRight,
+    'home': TerminalKey.home, 'end': TerminalKey.end, 'pgup': TerminalKey.pageUp, 'pgdn': TerminalKey.pageDown,
+    'f1': TerminalKey.f1, 'f2': TerminalKey.f2, 'f3': TerminalKey.f3, 'f4': TerminalKey.f4,
+    'f5': TerminalKey.f5, 'f6': TerminalKey.f6, 'f7': TerminalKey.f7, 'f8': TerminalKey.f8,
+    'f9': TerminalKey.f9, 'f10': TerminalKey.f10, 'f11': TerminalKey.f11, 'f12': TerminalKey.f12,
+  };
+
+  /// One key of the row (see keys.dart for the ids).
+  Widget _rowKey(String id) {
+    final label = keyLabel(id);
+    final tk = _termKeys[id];
+    if (tk != null) {
+      final arrow = arrowIcons[id];
+      return _DockKey(label: label, icon: arrow, repeat: arrow != null || id.startsWith('pg'), onTap: () => _key(tk));
+    }
+    if (id == 'ctrl') return _DockKey(label: 'Ctrl', on: _ctrl, onTap: () => setState(() => _ctrl = !_ctrl));
+    if (id == 'alt') return _DockKey(label: 'Alt', on: _alt, onTap: () => setState(() => _alt = !_alt));
+    if (id == 'paste') return _DockKey(label: 'Paste', onTap: _paste);
+    if (ctrlByte(id) case final b?) return _DockKey(label: label, onTap: () => _bytes([b]));
+    if (snippetOf(id) case (_, final text)) {
+      return _DockKey(label: label, onTap: () => _text(text.replaceAll('\r\n', '\r').replaceAll('\n', '\r')));
+    }
+    return _DockKey(label: label, onTap: () => _text(id));
+  }
+
+  List<List<String>> get _keyPagesShown => [for (final p in keyPages.value) if (p.isNotEmpty) p];
+
+  /// Up to eight equal keys a page (Settings › Key row); swipe sideways for the next page.
   Widget _keyRow() {
-    Widget key(String label, VoidCallback onTap, {bool on = false, bool repeat = false, IconData? icon}) =>
-        Expanded(child: _DockKey(label: label, icon: icon, on: on, repeat: repeat, onTap: onTap));
-    Widget page(List<Widget> keys) => Row(children: [
-          for (var i = 0; i < keys.length; i++) ...[if (i > 0) const SizedBox(width: 4), keys[i]],
-        ]);
+    final pages = _keyPagesShown;
     return SizedBox(
       height: 44,
       child: PageView(
         controller: _keysPage,
         onPageChanged: (i) => setState(() => _keysPageAt = i),
         children: [
-          page([
-            key('Esc', () => _key(TerminalKey.escape)),
-            key('Tab', () => _key(TerminalKey.tab)),
-            key('Ctrl', () => setState(() => _ctrl = !_ctrl), on: _ctrl),
-            key('Alt', () => setState(() => _alt = !_alt), on: _alt),
-            key('Left', () => _key(TerminalKey.arrowLeft), repeat: true, icon: Icons.arrow_back_rounded),
-            key('Down', () => _key(TerminalKey.arrowDown), repeat: true, icon: Icons.arrow_downward_rounded),
-            key('Up', () => _key(TerminalKey.arrowUp), repeat: true, icon: Icons.arrow_upward_rounded),
-            key('Right', () => _key(TerminalKey.arrowRight), repeat: true, icon: Icons.arrow_forward_rounded),
-          ]),
-          page([
-            key('^C', () => _bytes(const [0x03])),
-            key('^B', () => _bytes(const [0x02])),
-            key('Paste', _paste),
-            for (final s in const ['|', '~', '/', '-', '_']) key(s, () => _text(s)),
-          ]),
+          for (final keys in pages)
+            Row(children: [
+              for (var i = 0; i < keys.length; i++) ...[
+                if (i > 0) const SizedBox(width: 4),
+                Expanded(child: _rowKey(keys[i])),
+              ],
+            ]),
         ],
       ),
     );
@@ -1918,7 +1941,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   Widget _pageDots() => Padding(
         padding: const EdgeInsets.only(top: 6),
         child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          for (var i = 0; i < 2; i++)
+          for (var i = 0; i < _keyPagesShown.length; i++)
             AnimatedContainer(
               duration: const Duration(milliseconds: 150),
               margin: const EdgeInsets.symmetric(horizontal: 3),
@@ -1960,10 +1983,13 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                     ),
                   ),
                   const SizedBox(height: 18),
-                  Text('Can’t reach ${widget.title}',
+                  Text(_lostKey ? 'Not connected to ${widget.title}' : 'Can’t reach ${widget.title}',
                       style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: Tone.text)),
                   const SizedBox(height: 8),
-                  Text('Tried for 5 minutes. Your tmux session keeps running on the server; nothing there is lost.',
+                  Text(
+                      _lostKey
+                          ? 'The server’s key was not trusted. Your tmux session keeps running on the server.'
+                          : 'Tried for 5 minutes. Your tmux session keeps running on the server; nothing there is lost.',
                       style: TextStyle(fontSize: 15, height: 1.45, color: Tone.muted)),
                   const SizedBox(height: 8),
                   Text(_lostError!,

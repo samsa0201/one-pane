@@ -3,7 +3,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fonts.dart';
 import 'glass.dart';
+import 'keys.dart';
 import 'parts.dart';
+import 'security_screen.dart';
 
 /// A setting kept in shared preferences, observable by the screens that use it.
 class Pref<T> extends ValueNotifier<T> {
@@ -52,7 +54,7 @@ class SettingsScreen extends StatelessWidget {
         appBar: AppBar(toolbarHeight: 40),
         body: ListenableBuilder(
           listenable: Listenable.merge(
-              [termPalette, termFont, termFontSize, glassEffects, joystickOn, phoneMode, followActive]),
+              [termPalette, termFont, termFontSize, glassEffects, joystickOn, phoneMode, followActive, keyPages]),
           builder: (context, _) {
             final t = termPalette.value;
             return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 32), children: [
@@ -107,6 +109,13 @@ class SettingsScreen extends StatelessWidget {
               ]),
               const SectionLabel('Keys and moving'),
               Group(children: [
+                NavRow(
+                  title: 'Key row',
+                  value: Text(
+                      '${keyPages.value.where((p) => p.isNotEmpty).length} pages',
+                      style: TextStyle(fontSize: 14, color: Tone.muted)),
+                  onTap: () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const KeyRowScreen())),
+                ),
                 SwitchRow(
                   title: 'Joystick',
                   subtitle: 'Floating stick for panes, windows and sessions',
@@ -124,6 +133,18 @@ class SettingsScreen extends StatelessWidget {
                   subtitle: 'Jump when another client changes pane',
                   value: followActive.value,
                   onChanged: followActive.set,
+                ),
+              ]),
+              const SectionLabel('Security'),
+              Group(children: [
+                NavRow(
+                  title: 'Keys on this phone',
+                  onTap: () => Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const KeysScreen())),
+                ),
+                NavRow(
+                  title: 'Known hosts',
+                  onTap: () =>
+                      Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const KnownHostsScreen())),
                 ),
               ]),
             ]);

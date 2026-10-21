@@ -8,6 +8,7 @@ import 'ssh/connection.dart';
 import 'ui/fonts.dart';
 import 'ui/glass.dart';
 import 'ui/hosts_screen.dart';
+import 'ui/keys.dart';
 import 'ui/settings_screen.dart';
 
 // Debug-only: `--dart-define=POCKET_SEED=<base64 json of HostConfig + "key">` adds a host on first run,
@@ -27,6 +28,7 @@ Future<void> main() async {
   await loadFontPref();
   await loadThemePrefs();
   await loadSettings();
+  await loadKeyPages();
   runApp(const MyApp());
 }
 
