@@ -4,8 +4,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../tmux/layout.dart';
+import 'theme.dart';
 
-const accent = Color(0xFF4FC3F7);
 
 /// Pane rectangles scaled (aspect kept, or [stretch]ed to fill) into [box], keyed by pane id.
 Map<int, Rect> scaleRects(List<PaneRect> panes, Size box, {bool stretch = false}) {
@@ -89,9 +89,9 @@ class MiniMapPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final fill = Paint()..color = accent;
-    final other = Paint()..color = Colors.white.withValues(alpha: 0.08);
+    final other = Paint()..color = Tone.raised;
     final stroke = Paint()
-      ..color = Colors.white38
+      ..color = Tone.faint
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1;
     // Small gaps and rounded corners read better than shared 1px borders.

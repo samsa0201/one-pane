@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 
 import '../tmux/layout.dart';
 import 'glass.dart';
-import 'minimap.dart' show accent;
 
 /// Direction the knob points to (literal: pushed right → right), null inside the dead zone.
 Dir? stickDir(Offset knob, {double dead = 18}) {
@@ -14,7 +13,6 @@ Dir? stickDir(Offset knob, {double dead = 18}) {
   return knob.dy > 0 ? Dir.down : Dir.up;
 }
 
-const _switchColor = Color(0xFFFFB74D);
 
 /// Floating one-thumb navigator.
 /// - push the knob toward a side and let go → [onMove] (pane); chevrons show sides with a neighbour
@@ -104,7 +102,7 @@ class _JoystickState extends State<Joystick> {
 
   @override
   Widget build(BuildContext context) {
-    final color = _switch ? _switchColor : accent;
+    final color = _switch ? Tone.warn : accent;
     Widget chevron(Dir d, Alignment a, IconData icon) => Align(
       alignment: a,
       child: Icon(
@@ -113,8 +111,8 @@ class _JoystickState extends State<Joystick> {
         color: _dir == d
             ? color
             : _switch || widget.available.contains(d)
-            ? Colors.white70
-            : Colors.white12,
+            ? Tone.text
+            : Tone.line,
       ),
     );
     final label = !_switch || _dir == null ? null : (_dir == Dir.left || _dir == Dir.right ? 'W' : 'S');
@@ -173,18 +171,18 @@ class _JoystickState extends State<Joystick> {
                           shape: BoxShape.circle,
                           color: _dir == null
                               ? (_switch
-                                    ? _switchColor.withValues(alpha: 0.5)
-                                    : Colors.white.withValues(alpha: 0.35))
+                                    ? Tone.warn.withValues(alpha: 0.5)
+                                    : Tone.text.withValues(alpha: 0.35))
                               : color.withValues(alpha: 0.85),
                         ),
                         child: label == null
                             ? null
                             : Text(
                                 label,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w700,
-                                  color: Colors.black,
+                                  color: Tone.ground,
                                 ),
                               ),
                       ),

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
+import 'package:pinenacl/ed25519.dart' show SigningKey, ByteListExtension;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -115,7 +117,11 @@ class HostStore {
   Future<void> setOpenHost(String? id) async {
     final prefs = await SharedPreferences.getInstance();
     id == null ? await prefs.remove('openHost') : await prefs.setString('openHost', id);
+    if (id != null) await prefs.setString('lastHost', id);
   }
+
+  /// The host opened most recently (the "Continue" card).
+  Future<String?> lastHost() async => (await SharedPreferences.getInstance()).getString('lastHost');
 
   Future<void> _writeSecret(String key, String? value) => value == null || value.isEmpty
       ? _secure.delete(key: key)
@@ -127,7 +133,9 @@ String shellQuote(String s) => "'${s.replaceAll("'", r"'\''")}'";
 /// Connects over SSH and attaches tmux in control mode (no PTY): to [session] if it still exists
 /// (where the user was), else the host's own session (created if missing).
 /// Host key: trust on first use, stored per host id; a changed key is rejected.
-Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h, {String? session}) async {
+/// [trust]: asked about a host key seen for the first time (type, SHA256 fingerprint); null: trusted.
+Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h,
+    {String? session, Future<bool> Function(String type, String fingerprint)? trust}) async {
   final prefs = await SharedPreferences.getInstance();
   final socket = await SSHSocket.connect(h.host, h.port, timeout: const Duration(seconds: 10));
   final pem = h.privateKeyPem;
@@ -137,12 +145,14 @@ Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h, {String? session}) asy
     username: h.user,
     onPasswordRequest: () => h.password,
     identities: pem == null || pem.trim().isEmpty ? null : SSHKeyPair.fromPem(pem),
-    onVerifyHostKey: (type, fingerprint) {
+    onVerifyHostKey: (type, fingerprint) async {
       final fp = '$type ${base64.encode(fingerprint)}';
       final known = prefs.getString('hostkey:${h.id}');
       if (known == null) {
-        prefs.setString('hostkey:${h.id}', fp);
-        return true;
+        final ok = trust == null ? true : await trust(type, utf8.decode(fingerprint, allowMalformed: true));
+        if (ok) await prefs.setString('hostkey:${h.id}', fp);
+        if (!ok) keyError = 'Host key not trusted';
+        return ok;
       }
       if (known != fp) keyError = 'Host key changed for ${h.host} (expected $known, got $fp)';
       return known == fp;
@@ -171,5 +181,25 @@ Future<(SSHClient, TmuxClient)> connectTmux(HostConfig h, {String? session}) asy
     ssh.close();
     if (keyError != null) throw Exception(keyError);
     rethrow;
+  }
+}
+
+/// A new Ed25519 key made on this phone: (private key PEM, public `authorized_keys` line).
+(String, String) generateKey() {
+  final sk = SigningKey.generate();
+  final kp = OpenSSHEd25519KeyPair(
+      Uint8List.fromList(sk.verifyKey.asTypedList), Uint8List.fromList(sk.asTypedList), 'onepane');
+  return (kp.toPem(), publicLine(kp));
+}
+
+/// The `authorized_keys` line for [kp].
+String publicLine(SSHKeyPair kp) => '${kp.type} ${base64.encode(kp.toPublicKey().encode())} onepane';
+
+/// Public line of a private key PEM, or null if it does not parse (or needs a passphrase).
+String? publicLineOf(String pem) {
+  try {
+    return publicLine(SSHKeyPair.fromPem(pem).first);
+  } catch (_) {
+    return null;
   }
 }

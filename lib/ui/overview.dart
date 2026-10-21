@@ -126,22 +126,22 @@ class _PaneThumb extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
       // Smoked glass without a backdrop blur (several live thumbnails): dark tint + rim.
       decoration: BoxDecoration(
-        color: const Color(0xB30A0C11),
+        color: Tone.surface,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: current ? accent : Colors.white24, width: current ? 1.5 : 1),
+        border: Border.all(color: current ? accent : Tone.line, width: current ? 1.5 : 1),
         boxShadow: current ? [BoxShadow(color: accent.withValues(alpha: 0.35), blurRadius: 14)] : null,
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text('%$id',
             style: TextStyle(
-                color: current ? accent : Colors.white54, fontSize: 10, fontWeight: current ? FontWeight.w600 : null)),
+                color: current ? accent : Tone.muted, fontSize: 10, fontWeight: current ? FontWeight.w600 : null)),
         Expanded(
           child: ClipRect(
             child: Text(
               text,
               softWrap: false,
               overflow: TextOverflow.clip,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 6, height: lineH / 6, color: Colors.white70),
+              style: TextStyle(fontFamily: 'monospace', fontSize: 6, height: lineH / 6, color: Tone.muted),
             ),
           ),
         ),
@@ -185,7 +185,7 @@ class _SessionMapState extends State<SessionMap> {
           type: MaterialType.transparency,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
-            side: active ? const BorderSide(color: accent, width: 1.5) : BorderSide.none,
+            side: active ? BorderSide(color: accent, width: 1.5) : BorderSide.none,
           ),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
@@ -197,11 +197,11 @@ class _SessionMapState extends State<SessionMap> {
                 MiniMap(panes: panes, currentId: activePane, size: const Size(56, 34)),
                 const SizedBox(height: 6),
               ] else ...[
-                const Icon(Icons.dns_outlined, size: 28, color: Colors.white54),
+                Icon(Icons.dns_outlined, size: 28, color: Tone.muted),
                 const SizedBox(height: 6),
               ],
               Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center),
-              Text(subtitle, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+              Text(subtitle, style: TextStyle(fontSize: 11, color: Tone.muted)),
             ]),
           ),
         ),

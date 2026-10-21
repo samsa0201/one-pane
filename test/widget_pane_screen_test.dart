@@ -10,6 +10,7 @@ import 'package:tmux_pocket/tmux/control.dart';
 import 'package:tmux_pocket/ui/joystick.dart';
 import 'package:tmux_pocket/ui/minimap.dart';
 import 'package:tmux_pocket/ui/pane_screen.dart';
+import 'package:tmux_pocket/ui/settings_screen.dart';
 import 'package:xterm/xterm.dart';
 
 const layout = '7f31,160x48,0,0{80x48,0,0,0,79x48,81,0[79x24,81,0,1,79x23,81,25,2]}';
@@ -55,6 +56,7 @@ Future<List<String>> pumpScreen(WidgetTester tester,
     int? initialPane,
     void Function(String, int)? onPlace}) async {
   SharedPreferences.setMockInitialValues({});
+  resetSettings();
   curLayout = layout;
   silent = false;
   tester.view.physicalSize = const Size(1080, 2400);
@@ -150,12 +152,12 @@ void main() {
 
   testWidgets('sheet: another session opens to its windows; tapping one goes there', (tester) async {
     final cmds = await pumpScreen(tester);
-    await tester.tap(find.textContaining('0:main')); // window bar → sheet
+    await tester.tap(find.text('main')); // session chip → switcher
     await tester.pumpAndSettle();
     await tester.tap(find.text('work'));
     await tester.pumpAndSettle();
     expect(cmds, contains("list-windows -t 'work' -F '#{window_index} #{window_panes} #{window_name}'"));
-    await tester.tap(find.text('1:server'));
+    await tester.tap(find.text('server').last);
     await tester.pumpAndSettle();
     expect(cmds, containsAllInOrder(["select-window -t 'work:1'", "switch-client -t 'work'"]));
   });
@@ -168,7 +170,7 @@ void main() {
     await tester.pumpAndSettle();
     final wheelUp = cmds.where((c) => c.startsWith('send-keys -t %0 -H 1b 5b 3c 36 34 3b')).length;
     expect(wheelUp, greaterThan(3));
-    expect(find.text('LIVE'), findsNothing); // no history view on the alt screen
+    expect(find.text('Back to live'), findsNothing); // no history view on the alt screen
 
     modes = '1 0 0';
     await tester.dragFrom(const Offset(150, 500), const Offset(0, -5)); // a touch refreshes the modes
@@ -210,7 +212,10 @@ void main() {
   });
 
   testWidgets('desk mode pref: ignore-size, no client size, no zoom', (tester) async {
-    SharedPreferences.setMockInitialValues({'phoneMode': false});
+    SharedPreferences.setMockInitialValues({});
+    resetSettings();
+    phoneMode.value = false;
+    addTearDown(resetSettings);
     final (client, cmds, _) = fakeTmux();
     await tester.pumpWidget(MaterialApp(home: PaneScreen(client: client, session: 'main')));
     await tester.pump(const Duration(milliseconds: 300));
@@ -220,7 +225,7 @@ void main() {
 
   testWidgets('fling the top bar left goes to the next window', (tester) async {
     final cmds = await pumpScreen(tester, twoWindows: true);
-    await tester.fling(find.textContaining('0:main'), const Offset(-200, 0), 1000);
+    await tester.fling(find.text('0 main'), const Offset(-200, 0), 1000);
     await tester.pumpAndSettle();
     expect(cmds, contains('select-window -t @2'));
   });
@@ -238,6 +243,8 @@ void main() {
 
   testWidgets('overview button opens the overview, picking a pane keeps the zoom', (tester) async {
     final cmds = await pumpScreen(tester);
+    await tester.tap(find.text('main')); // switcher has the overview button
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Overview'));
     await tester.pumpAndSettle();
     for (final id in ['%0', '%1', '%2']) {
@@ -253,18 +260,18 @@ void main() {
     await tester.dragFrom(const Offset(150, 300), const Offset(0, 300));
     await tester.pumpAndSettle();
     expect(cmds, contains('capture-pane -p -e -J -S -2000 -t %0'));
-    expect(find.text('LIVE'), findsOneWidget);
+    expect(find.text('Back to live'), findsOneWidget);
     expect(find.byType(TerminalView), findsNWidgets(2));
-    await tester.tap(find.text('LIVE'));
+    await tester.tap(find.text('Back to live'));
     await tester.pump();
-    expect(find.text('LIVE'), findsNothing);
+    expect(find.text('Back to live'), findsNothing);
 
     await tester.dragFrom(const Offset(150, 300), const Offset(0, 300));
     await tester.pumpAndSettle();
-    expect(find.text('LIVE'), findsOneWidget);
+    expect(find.text('Back to live'), findsOneWidget);
     await tester.tap(find.text('Esc'));
     await tester.pump();
-    expect(find.text('LIVE'), findsNothing);
+    expect(find.text('Back to live'), findsNothing);
   });
 
   testWidgets('connection drop: banner, reconnect, new client used', (tester) async {
@@ -300,7 +307,6 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pump();
     expect(cmds, contains('display -p ok'));
-    expect(find.textContaining(RegExp(r'main  \d+ms')), findsOneWidget);
 
     silent = true; // connection silently dead
     await tester.pump(const Duration(seconds: 5)); // next beat
@@ -310,6 +316,36 @@ void main() {
     await tester.pump(const Duration(seconds: 2)); // 8 s without a reply
     await tester.pump(const Duration(milliseconds: 50));
     expect(calls, 1);
+  });
+
+  testWidgets('reconnect gives up after 5 minutes: the card offers Try again', (tester) async {
+    var calls = 0;
+    await pumpScreen(tester, reconnect: () async {
+      calls++;
+      throw Exception('network down');
+    });
+    await _out.close();
+    for (var i = 0; i < 40; i++) {
+      await tester.pump(const Duration(seconds: 10));
+    }
+    expect(find.text('Try again'), findsOneWidget);
+    expect(find.textContaining('network down'), findsOneWidget);
+    final before = calls;
+    await tester.tap(find.text('Try again'));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(calls, before + 1);
+    expect(find.text('Try again'), findsNothing);
+    await tester.pumpWidget(const SizedBox()); // stop the new retry loop
+    await tester.pump(const Duration(seconds: 20));
+  });
+
+  testWidgets('latency shows in the switcher', (tester) async {
+    await pumpScreen(tester);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    await tester.tap(find.text('main'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining(RegExp(r'\d+ ms')), findsOneWidget);
   });
 
   testWidgets('killed session (%sessions-changed + %exit) does not reconnect', (tester) async {
@@ -361,6 +397,8 @@ void main() {
 
   testWidgets('overview Sessions button opens the session map', (tester) async {
     await pumpScreen(tester);
+    await tester.tap(find.text('main')); // switcher has the overview button
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Overview'));
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.view_module));
@@ -377,8 +415,8 @@ void main() {
       return null;
     });
     addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
-    await tester.tap(find.text('⋯')); // second page of keys
-    await tester.pump();
+    await tester.drag(find.text('Esc'), const Offset(-500, 0)); // second page of keys
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Paste'));
     await tester.pump();
     expect(cmds, contains('send-keys -t %0 -H 61 0d 62'));
@@ -389,4 +427,11 @@ void main() {
     await tester.pump();
     expect(cmds, contains('send-keys -t %0 -H 1b 5b 32 30 30 7e 61 0d 62 1b 5b 32 30 31 7e'));
   });
+}
+
+void resetSettings() {
+  phoneMode.value = true;
+  joystickOn.value = true;
+  followActive.value = true;
+  termFontSize.value = 13;
 }

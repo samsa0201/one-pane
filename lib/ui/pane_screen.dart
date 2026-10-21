@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' show ParagraphBuilder, ParagraphConstraints;
 
+import 'package:clock/clock.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/gestures.dart' show VelocityTracker;
@@ -21,6 +22,8 @@ import 'joystick.dart';
 import 'term_filter.dart';
 import 'minimap.dart';
 import 'overview.dart';
+import 'parts.dart';
+import 'settings_screen.dart';
 
 
 /// Terminal text: the chosen Nerd Font (Hack bundled; icons in nvim, prompts), then symbol / CJK /
@@ -89,8 +92,12 @@ class PaneScreen extends StatefulWidget {
 
   /// Told the (session, pane) shown whenever it changes, to reopen there next time.
   final void Function(String session, int paneId)? onPlace;
+
+  /// Host name, for the switcher and the connection-lost card.
+  final String title;
   const PaneScreen(
       {super.key,
+      this.title = 'server',
       this.ssh,
       required this.client,
       required this.session,
@@ -111,7 +118,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   (String, int)? _placed;
   List<WindowInfo> _windows = [];
   int? _winId, _paneId;
-  bool _follow = true, _jumpToActive = false, _exited = false;
+  bool _jumpToActive = false, _exited = false;
   final _panes = <int, _Pane>{};
   late StreamSubscription<TmuxEvent> _sub;
   Timer? _reloadTimer, _cmdTimer;
@@ -130,6 +137,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   double _lineH = 16; // terminal line height in px, set by build
   int _gesturePtrs = 0; // max fingers down in this gesture
   bool _reconnecting = false;
+  int _tries = 0; // reconnect attempts so far
+  String? _why; // what dropped the connection
+  String? _lostError; // reconnecting gave up: the card offers retry
   // Heartbeat: a no-op tmux command every 5 s; its round trip is the latency shown in the bar, no reply
   // in time = a dead connection (TCP can stay silent for minutes after a network change).
   Timer? _beatTimer;
@@ -148,12 +158,11 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   // Phone mode (default): tmux sizes the window to our cols×rows at font [_font] and the shown pane is
   // kept zoomed. Desk mode: ignore-size, real pane size, font = fit-to-width × [_zoom] (≥ 1).
-  static const _phonePref = 'phoneMode', _joystickPref = 'joystick', _stickPref = 'joystickPos';
-  bool _joystick = true;
+  static const _stickPref = 'joystickPos';
   Offset? _stick; // joystick centre as a fraction of the terminal area; null: bottom right
   bool? _phoneMode; // null until the pref is loaded: render as phone, send nothing yet
   bool get _phone => _phoneMode ?? true;
-  double _font = 13;
+  double _font = termFontSize.value;
   double _zoom = 1;
   final _cells = <double, Size>{}; // font size → cell size
   (int, int)? _wantSize, _sentSize;
@@ -208,24 +217,38 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         _loadCommands();
       }
     });
-    () async {
-      var phone = true;
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        phone = prefs.getBool(_phonePref) ?? true;
-        _joystick = prefs.getBool(_joystickPref) ?? true;
-        if (prefs.getString(_stickPref)?.split(',').map(double.tryParse).toList() case [final x?, final y?]) {
-          _stick = Offset(x, y);
-        }
-      } catch (_) {}
-      if (mounted) _setPhone(phone, persist: false);
-    }();
+    phoneMode.addListener(_phoneChanged);
+    joystickOn.addListener(_settingsChanged);
+    termPalette.addListener(_paletteChanged);
+    termFontSize.addListener(_fontSizeChanged);
+    _setPhone(phoneMode.value);
+    SharedPreferences.getInstance().then((prefs) {
+      if (prefs.getString(_stickPref)?.split(',').map(double.tryParse).toList() case [final x?, final y?]) {
+        if (mounted) setState(() => _stick = Offset(x, y));
+      }
+    }).catchError((_) {});
   }
 
-  void _setPhone(bool on, {bool persist = true}) {
+  void _settingsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _paletteChanged() {
+    _colorsSent.clear();
+    _reportColors();
+    _settingsChanged();
+  }
+
+  void _phoneChanged() => _setPhone(phoneMode.value);
+
+  void _fontSizeChanged() {
+    if (mounted && _font != termFontSize.value) setState(() => _font = termFontSize.value);
+  }
+
+  void _setPhone(bool on) {
     final was = _phoneMode;
+    if (was == on) return;
     setState(() => _phoneMode = on);
-    if (persist) SharedPreferences.getInstance().then((p) => p.setBool(_phonePref, on)).catchError((_) => true);
     if (on) {
       if (was == false) _run(client.ignoreSize(false));
       _sentSize = _wantSize = null; // next build re-sends -C
@@ -268,7 +291,12 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     termFont.removeListener(_fontChanged);
+    phoneMode.removeListener(_phoneChanged);
+    joystickOn.removeListener(_settingsChanged);
+    termPalette.removeListener(_paletteChanged);
+    termFontSize.removeListener(_fontSizeChanged);
     _histScroll.dispose();
+    _keysPage.dispose();
     _sub.cancel();
     _reloadTimer?.cancel();
     _cmdTimer?.cancel();
@@ -339,8 +367,9 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   /// Connection dropped (not by us): reconnect if we can, else leave.
   void _lost(String msg) {
-    if (_exited || !mounted || _reconnecting) return;
+    if (_exited || !mounted || _reconnecting || _lostError != null) return;
     if (widget.reconnect == null) return _exit(msg);
+    _why = msg;
     _reconnectLoop();
   }
 
@@ -349,19 +378,21 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   Future<void> _reconnectLoop() async {
     setState(() {
       _reconnecting = true;
+      _tries = 0;
       _rttMs = null;
     });
     _sub.cancel();
     client.close().catchError((_) {});
     _ssh?.close();
-    final until = DateTime.now().add(const Duration(minutes: 5));
+    final until = clock.now().add(const Duration(minutes: 5)); // clock: fake time in tests
     var delay = 0;
     Object? error;
-    while (DateTime.now().isBefore(until)) {
+    while (clock.now().isBefore(until)) {
       final kick = _kick = Completer<void>();
       await Future.any([Future<void>.delayed(Duration(seconds: delay)), kick.future]);
       delay = delay == 0 ? 1 : min(delay * 2, 15);
       if (!mounted || _exited) return;
+      setState(() => _tries++);
       try {
         final (ssh, c) = await widget.reconnect!();
         if (!mounted || _exited) {
@@ -380,12 +411,17 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         error = e;
       }
     }
-    _reconnecting = false;
-    _exit('Reconnect failed: $error');
+    if (mounted) {
+      setState(() {
+        _reconnecting = false;
+        _lostError = '$error';
+      });
+    }
   }
 
   /// After a reconnect: same window/pane if they still exist, panes reseeded, size/zoom re-sent.
   Future<void> _restore() async {
+    _colorsSent.clear(); // a new client: tell tmux again
     for (final p in _panes.values) {
       p.state = 0; // drop output until reseeded
     }
@@ -421,7 +457,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         _jumpToActive = true;
         _scheduleReload();
       case ActivePaneEvent():
-        if (_follow && e.windowId == _winId && e.paneId != _paneId) {
+        if (followActive.value && e.windowId == _winId && e.paneId != _paneId) {
           _slideFrom = Offset.zero;
           _showPane(e.paneId);
         }
@@ -440,12 +476,12 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (e is! OutputEvent) _lastEvent = e;
   }
 
-  void _exit(String msg) {
+  void _exit(String? msg) {
     if (_exited || !mounted) return;
     _exited = true;
     final messenger = ScaffoldMessenger.of(context);
     Navigator.of(context).popUntil((r) => r.isFirst);
-    messenger.showSnackBar(SnackBar(content: Text(msg)));
+    if (msg != null) messenger.showSnackBar(SnackBar(content: Text(msg)));
   }
 
   void _scheduleReload() {
@@ -471,7 +507,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
       _windows = windows;
       final active = windows.where((w) => w.active).firstOrNull ?? windows.first;
       final oldWin = _winId;
-      if (_winId == null || _window == null || (_follow && !keepIds) || _jumpToActive) _winId = active.id;
+      if (_winId == null || _window == null || (followActive.value && !keepIds) || _jumpToActive) _winId = active.id;
       _jumpToActive = false;
       if (wantWin != null) _winId = wantWin.id;
       final win = _window!;
@@ -512,6 +548,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     }
     _refreshModes();
     _remember();
+    _reportColors();
     if ((_winId, _paneId) != before) {
       _keepZoomed();
       _wakeHints();
@@ -580,11 +617,25 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
   void Function(String) _writer(Terminal t) => (s) {
         _writing = true;
         try {
-          t.write((_filters[t] ??= TermFilter()).add(s));
+          t.write((_filters[t] ??= TermFilter(blend: _blend)).add(s));
         } finally {
           _writing = false;
         }
       };
+
+  static bool _blend() => blendBackgrounds.value && !termPalette.value.light;
+
+  /// tmux answers programs' OSC 10/11 colour queries (nvim, Claude Code pick light or dark from them);
+  /// tell it this theme's colours for every pane, once per pane and theme.
+  final _colorsSent = <int>{};
+  void _reportColors() {
+    final t = termPalette.value;
+    for (final id in _panes.keys) {
+      if (!_colorsSent.add(id)) continue;
+      client.reportColor(id, '10;${oscColor(t.fg)}').then((_) {}, onError: (_) {}); // old tmux: no -r
+      client.reportColor(id, '11;${oscColor(t.bg)}').then((_) {}, onError: (_) {});
+    }
+  }
 
   // ---------- input ----------
 
@@ -736,7 +787,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     }
     if (!mounted || id != _paneId) return;
     final t = Terminal(maxLines: 5000)..resize(r.w, r.h);
-    t.write(TermFilter().add(text));
+    t.write(TermFilter(blend: _blend).add(text));
     _histAway = false;
     setState(() => _history = (id, t));
     // first frame lays out the view at its bottom; then the drag so far
@@ -924,7 +975,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     final size = _scrubSize;
     return IgnorePointer(
       child: ColoredBox(
-        color: Colors.black54,
+        color: Tone.ground.withValues(alpha: 0.7),
         child: Center(
           child: SizedBox.fromSize(
             size: size,
@@ -938,7 +989,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
                       _commands[e.key] ?? '%${e.key}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 16, color: e.key == _scrubAt ? Colors.black : Colors.white),
+                      style: TextStyle(fontSize: 16, color: e.key == _scrubAt ? Tone.onAccent : Tone.text),
                     ),
                   ),
                 ),
@@ -1007,6 +1058,7 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     if (s != null && _ptrs.length == 2) {
       _start = null;
       final delta = _focal(_ptrs) - _focal(s);
+      if (_pinching && _phone) termFontSize.set(_font);
       if (_pinching) {
         final atMin = _phone ? _startFont <= 8 : _startZoom <= 1.001;
         if (atMin && _scale < 0.7) _openOverview();
@@ -1031,245 +1083,328 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   // ---------- sheets ----------
 
+  /// Switcher: every session of this host, the current one open to its windows.
   void _sheet() {
+    final open = <String>{_session};
     showGlassSheet<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) => SafeArea(
           child: FutureBuilder<List<SessionInfo>>(
             future: client.listSessions(),
-            builder: (ctx, snap) => ListView(shrinkWrap: true, children: [
-              const _Header('Sessions'),
-              _Group(children: [
-              // Each session opens to its windows; the current one starts open.
-              for (final s in snap.data ?? const <SessionInfo>[])
-                ExpansionTile(
-                  key: PageStorageKey('session ${s.name}'),
-                  shape: const Border(),
-                  collapsedShape: const Border(),
-                  initiallyExpanded: s.name == _session,
-                  leading: Icon(Icons.dns, color: s.name == _session ? accent : null),
-                  title: Text(s.name, style: TextStyle(color: s.name == _session ? accent : null)),
-                  subtitle: Text('${s.windows} windows${s.attached ? ' · attached' : ''}'),
-                  childrenPadding: const EdgeInsets.only(left: 16),
-                  children: s.name == _session
-                      ? [
-                          for (final w in _windows)
-                            ListTile(
-                              leading: const Icon(Icons.web_asset),
-                              title: Text('${w.index}:${w.name}'),
-                              subtitle: Text('${w.panes.length} panes${w.zoomed ? ' · zoomed' : ''}'),
-                              selected: w.id == _winId,
-                              trailing: SizedBox(
-                                  width: 40,
-                                  height: 26,
-                                  child: MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(40, 26))),
-                              onTap: () {
-                                Navigator.pop(ctx);
-                                _selectWindow(w.id);
-                              },
-                            ),
-                          ListTile(
-                            leading: const Icon(Icons.add),
-                            title: const Text('New window'),
-                            onTap: () {
-                              Navigator.pop(ctx);
-                              _run(client.newWindow());
-                            },
-                          ),
-                        ]
-                      : [
-                          FutureBuilder<List<(int, String, int)>>(
-                            future: client.listWindowsOf(s.name),
-                            builder: (ctx, ws) => Column(children: [
-                              if (!ws.hasData) const LinearProgressIndicator(minHeight: 1),
-                              for (final (idx, name, panes) in ws.data ?? const <(int, String, int)>[])
-                                ListTile(
-                                  leading: const Icon(Icons.web_asset),
-                                  title: Text('$idx:$name'),
-                                  subtitle: Text('$panes panes'),
-                                  onTap: () {
-                                    Navigator.pop(ctx);
-                                    _run(client.switchTo(s.name, idx));
-                                  },
-                                ),
-                            ]),
-                          ),
-                        ],
+            builder: (ctx, snap) {
+              final sessions = snap.data ?? const <SessionInfo>[];
+              Widget windowRow(int index, String name, String sub, bool current, Widget? map, VoidCallback onTap) =>
+                  InkWell(
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      onTap();
+                    },
+                    child: Container(
+                      constraints: const BoxConstraints(minHeight: 56),
+                      color: current ? accent.withValues(alpha: 0.08) : null,
+                      padding: const EdgeInsets.fromLTRB(28, 8, 16, 8),
+                      child: Row(children: [
+                        SizedBox(
+                            width: 22,
+                            child: Text('$index',
+                                style: TextStyle(
+                                    fontFamily: termFont.value, fontSize: 12, color: current ? accent : Tone.muted))),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontFamily: termFont.value,
+                                    fontSize: 14,
+                                    fontWeight: current ? FontWeight.w600 : FontWeight.w500,
+                                    color: current ? accent : Tone.text)),
+                            Text(sub, style: TextStyle(fontSize: 12, color: Tone.muted)),
+                          ]),
+                        ),
+                        ?map,
+                      ]),
+                    ),
+                  );
+              return ListView(shrinkWrap: true, padding: const EdgeInsets.fromLTRB(12, 4, 12, 12), children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 0, 12),
+                  child: Row(children: [
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(widget.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: Tone.text)),
+                        Text(
+                            [if (_rttMs case final ms?) '$ms ms', if (snap.hasData) '${sessions.length} sessions']
+                                .join(' · '),
+                            style: TextStyle(fontFamily: termFont.value, fontSize: 12, color: Tone.muted)),
+                      ]),
+                    ),
+                    _DockKey(
+                        tooltip: 'Overview',
+                        icon: Icons.grid_view_rounded,
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _openOverview();
+                        }),
+                    const SizedBox(width: 8),
+                    _DockKey(
+                        tooltip: 'Settings',
+                        icon: Icons.tune_rounded,
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          openSettings(context);
+                        }),
+                  ]),
                 ),
-              ListTile(
-                leading: const Icon(Icons.add),
-                title: const Text('New session'),
-                onTap: () async {
+                if (!snap.hasData) LinearProgressIndicator(minHeight: 1, color: accent),
+                for (final s in sessions) ...[
+                  Group(color: Tone.raised.withValues(alpha: 0.75), children: [
+                    InkWell(
+                      onTap: () => setSheet(() => open.contains(s.name) ? open.remove(s.name) : open.add(s.name)),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 56),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(children: [
+                          Expanded(
+                            child: Text(s.name,
+                                style: TextStyle(
+                                    fontFamily: termFont.value,
+                                    fontSize: 15,
+                                    fontWeight: s.name == _session ? FontWeight.w600 : FontWeight.w500,
+                                    color: s.name == _session ? accent : Tone.text)),
+                          ),
+                          Text('${s.windows} window${s.windows == 1 ? '' : 's'}',
+                              style: TextStyle(fontSize: 12, color: Tone.muted)),
+                          const SizedBox(width: 6),
+                          Icon(open.contains(s.name) ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                              size: 20, color: Tone.muted),
+                        ]),
+                      ),
+                    ),
+                    if (open.contains(s.name) && s.name == _session) ...[
+                      for (final w in _windows)
+                        windowRow(
+                          w.index,
+                          w.name,
+                          '${w.panes.length} pane${w.panes.length == 1 ? '' : 's'}${w.id == _winId ? ' · you are here' : ''}',
+                          w.id == _winId,
+                          SizedBox(
+                              width: 34,
+                              height: 24,
+                              child: MiniMap(panes: w.panes, currentId: w.activePane, size: const Size(34, 24))),
+                          () => _selectWindow(w.id),
+                        ),
+                      InkWell(
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _run(client.newWindow());
+                        },
+                        child: Container(
+                          constraints: const BoxConstraints(minHeight: 48),
+                          padding: const EdgeInsets.only(left: 28),
+                          child: Row(children: [
+                            Icon(Icons.add_rounded, size: 18, color: accent),
+                            const SizedBox(width: 10),
+                            Text('New window', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: accent)),
+                          ]),
+                        ),
+                      ),
+                    ] else if (open.contains(s.name))
+                      FutureBuilder<List<(int, String, int)>>(
+                        future: client.listWindowsOf(s.name),
+                        builder: (ctx, ws) => Column(children: [
+                          if (!ws.hasData) LinearProgressIndicator(minHeight: 1, color: accent),
+                          for (final (idx, name, panes) in ws.data ?? const <(int, String, int)>[])
+                            windowRow(idx, name, '$panes pane${panes == 1 ? '' : 's'}', false, null,
+                                () => _run(client.switchTo(s.name, idx))),
+                        ]),
+                      ),
+                  ]),
+                  const SizedBox(height: 8),
+                ],
+                const SizedBox(height: 4),
+                PillButton('New session', icon: Icons.add_rounded, primary: false, onPressed: () async {
                   Navigator.pop(ctx);
                   final name = await _askName('New session');
                   if (name != null && name.isNotEmpty) _run(client.newSession(name));
-                },
-              ),
-              ]),
-              const _Header('Settings'),
-              _Group(children: [
-              SwitchListTile(
-                title: const Text('Follow active pane'),
-                subtitle: const Text('Jump when the pane changes from another client'),
-                value: _follow,
-                onChanged: (v) {
-                  setState(() => _follow = v);
-                  setSheet(() {});
-                },
-              ),
-              SwitchListTile(
-                title: const Text('Phone mode'),
-                subtitle: const Text('Size tmux to this screen and zoom the shown pane. Off: mirror the '
-                    'desktop size and scale the font'),
-                value: _phone,
-                onChanged: (v) {
-                  _setPhone(v);
-                  setSheet(() {});
-                },
-              ),
-              SwitchListTile(
-                title: const Text('Joystick'),
-                subtitle: const Text('Floating stick: push toward a pane and let go to move there; tap for the '
-                    'overview'),
-                value: _joystick,
-                onChanged: (v) {
-                  setState(() => _joystick = v);
-                  setSheet(() {});
-                  SharedPreferences.getInstance().then((p) => p.setBool(_joystickPref, v)).catchError((_) => true);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.font_download_outlined),
-                title: const Text('Terminal font'),
-                subtitle: Text(termFonts.firstWhere((f) => f.family == termFont.value).name),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _fontPicker();
-                },
-              ),
-              SwitchListTile(
-                title: const Text('Glass effects'),
-                subtitle: const Text('Frosted, see-through panels. Off: plain panels, lighter on the GPU'),
-                value: glassEffects.value,
-                onChanged: (v) {
-                  setGlassEffects(v);
-                  setSheet(() {});
-                },
-              ),
-              ]),
-              const SizedBox(height: 8),
-            ]),
+                }),
+              ]);
+            },
           ),
         ),
       ),
     );
   }
 
-  /// Nerd Fonts: Hack is bundled, the others download once (about 2–5 MB each) when picked.
-  void _fontPicker() {
-    String? busy;
-    double progress = 0;
-    showGlassSheet<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
-          child: ListView(shrinkWrap: true, children: [
-            const _Header('Terminal font'),
-            _Group(children: [
-            for (final f in termFonts)
-              FutureBuilder<bool>(
-                future: fontReady(f),
-                builder: (ctx, ready) => ListTile(
-                  title: Text(f.name, style: ready.data == true ? TextStyle(fontFamily: f.family) : null),
-                  subtitle: Text(f.bundled ? 'built in' : (ready.data == true ? 'downloaded' : 'tap to download')),
-                  selected: f.family == termFont.value,
-                  trailing: busy == f.family
-                      ? SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(value: progress > 0 ? progress : null, strokeWidth: 2))
-                      : f.family == termFont.value
-                          ? const Icon(Icons.check)
-                          : ready.data == false
-                              ? const Icon(Icons.download_outlined)
-                              : null,
-                  onTap: busy != null
-                      ? null
-                      : () async {
-                          setSheet(() {
-                            busy = f.family;
-                            progress = 0;
-                          });
-                          final messenger = ScaffoldMessenger.of(context);
-                          try {
-                            await useFont(f, onProgress: (p) {
-                              if (ctx.mounted) setSheet(() => progress = p);
-                            });
-                          } catch (e) {
-                            messenger.showSnackBar(SnackBar(content: Text('${f.name}: $e')));
-                          }
-                          if (ctx.mounted) setSheet(() => busy = null);
-                        },
-                ),
-              ),
-            ]),
-            const SizedBox(height: 8),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  Future<String?> _askName(String title) {
-    final c = TextEditingController();
+  Future<String?> _askName(String title, [String initial = '']) {
+    final c = TextEditingController(text: initial);
     return showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: TextField(controller: c, autofocus: true, onSubmitted: (v) => Navigator.pop(ctx, v.trim())),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Tone.text)),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          style: TextStyle(fontFamily: termFont.value, color: Tone.text),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: TextStyle(color: Tone.text))),
           TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('OK')),
         ],
       ),
     );
   }
 
+  Future<void> _renameWindow(WindowInfo w) async {
+    final name = await _askName('Rename window', w.name);
+    if (name != null && name.isNotEmpty && name != w.name) _run(client.renameWindow(w.id, name));
+  }
+
+  Future<void> _killWindow(WindowInfo w) async {
+    final n = w.panes.length;
+    if (await confirmDanger(context,
+        title: 'Kill window “${w.name}”?',
+        body: '$n pane${n == 1 ? '' : 's'} and ${n == 1 ? 'its process stops' : 'their processes stop'}. '
+            'This can’t be undone.',
+        action: 'Kill')) {
+      _run(client.killWindow(w.id));
+    }
+  }
+
+  /// Long-press on a window tab.
+  void _windowMenu(WindowInfo w) {
+    HapticFeedback.mediumImpact();
+    showGlassSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+              child: Text('${w.index} ${w.name}',
+                  style: TextStyle(fontFamily: termFont.value, fontSize: 17, fontWeight: FontWeight.w600, color: Tone.text)),
+            ),
+            Group(color: Tone.raised.withValues(alpha: 0.75), children: [
+              NavRow(
+                  title: 'Rename window',
+                  icon: Icons.edit_rounded,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _renameWindow(w);
+                  }),
+              NavRow(
+                  title: 'Kill window…',
+                  icon: Icons.delete_outline_rounded,
+                  color: Tone.danger,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _killWindow(w);
+                  }),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /// Hold the minimap: what to do with the shown pane.
   void _actions() {
-    final id = _paneId;
-    if (id == null) return;
+    final id = _paneId, w = _window, r = _termRect;
+    if (id == null || w == null) return;
     HapticFeedback.mediumImpact();
     void act(BuildContext ctx, Future<void> Function() f) {
       Navigator.pop(ctx);
       _run(f());
     }
 
+    Widget tile(BuildContext ctx, IconData icon, String label, Future<void> Function() f) => Material(
+          color: Tone.raised.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(14),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => act(ctx, f),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Icon(icon, size: 22, color: accent),
+                Text(label, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Tone.text)),
+              ]),
+            ),
+          ),
+        );
+
     showGlassSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: Padding(padding: const EdgeInsets.only(top: 6, bottom: 10), child: _Group(children: [
-          ListTile(
-              leading: const Icon(Icons.vertical_split),
-              title: const Text('Split ↔ (side by side)'),
-              onTap: () => act(ctx, () => client.split(id, horizontal: true))),
-          ListTile(
-              leading: const Icon(Icons.horizontal_split),
-              title: const Text('Split ↕ (stacked)'),
-              onTap: () => act(ctx, () => client.split(id, horizontal: false))),
-          ListTile(
-              leading: const Icon(Icons.zoom_out_map),
-              title: const Text('Toggle zoom'),
-              onTap: () => act(ctx, () => client.toggleZoom(id))),
-          ListTile(
-              leading: const Icon(Icons.add_box_outlined),
-              title: const Text('New window'),
-              onTap: () => act(ctx, client.newWindow)),
-          ListTile(
-              leading: const Icon(Icons.close, color: Colors.redAccent),
-              title: Text('Kill pane %$id'),
-              onTap: () => act(ctx, () => client.killPane(id))),
-        ])),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 14),
+              child: Row(children: [
+                MiniMap(panes: w.panes, currentId: id, size: const Size(30, 40)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text.rich(TextSpan(children: [
+                      TextSpan(text: _commands[id] ?? 'pane'),
+                      TextSpan(text: '  %$id', style: TextStyle(fontWeight: FontWeight.w400, color: Tone.muted)),
+                    ]),
+                        style: TextStyle(
+                            fontFamily: termFont.value, fontSize: 17, fontWeight: FontWeight.w600, color: Tone.text)),
+                    Text('${w.name}${r == null ? '' : ' · ${r.w} × ${r.h}'}',
+                        style: TextStyle(fontSize: 13, color: Tone.muted)),
+                  ]),
+                ),
+              ]),
+            ),
+            GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              childAspectRatio: 2.1,
+              children: [
+                tile(ctx, Icons.vertical_split_outlined, 'Split right', () => client.split(id, horizontal: true)),
+                tile(ctx, Icons.horizontal_split_outlined, 'Split down', () => client.split(id, horizontal: false)),
+                tile(ctx, Icons.open_in_full_rounded, _phone ? 'Zoom on server' : 'Toggle zoom', () => client.toggleZoom(id)),
+                tile(ctx, Icons.add_box_outlined, 'New window', client.newWindow),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Group(color: Tone.raised.withValues(alpha: 0.75), children: [
+              NavRow(
+                  title: 'Rename window',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _renameWindow(w);
+                  }),
+              if (w.panes.length > 1)
+                NavRow(title: 'Move pane to new window', onTap: () => act(ctx, () => client.breakPane(id))),
+              NavRow(
+                  title: 'Kill pane…',
+                  icon: Icons.delete_outline_rounded,
+                  color: Tone.danger,
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    if (await confirmDanger(context,
+                        title: 'Kill this pane?',
+                        body: '${_commands[id] ?? 'Its process'} stops. This can’t be undone.',
+                        action: 'Kill')) {
+                      _run(client.killPane(id));
+                    }
+                  }),
+            ]),
+          ]),
+        ),
       ),
     );
   }
@@ -1278,27 +1413,32 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
+    final kb = _keyboardUp;
     return Scaffold(
       body: SafeArea(
+        bottom: false, // the bar paints under the navigation bar
         child: Stack(fit: StackFit.expand, children: [
           Column(children: [
-            // Window bar + keys: one glass dock at the bottom, next to the thumb.
-            Expanded(child: _terminalArea()),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
-              // Concentric: dock radius 28, inner padding 8 → keys and buttons radius 20 at the corners.
-              child: Glass(
-                radius: const BorderRadius.all(Radius.circular(28)),
-                padding: const EdgeInsets.all(8),
+            Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: _terminalArea())),
+            // Context row + keys next to the thumb, on a surface one step above the terminal.
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: Tone.surface,
+                border: Border(top: BorderSide(color: Tone.line, width: 0.5)),
+              ),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(8, kb ? 4 : 6, 8, (kb ? 6 : 6) + MediaQuery.paddingOf(context).bottom),
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  _topBar(),
-                  const SizedBox(height: 8),
-                  _extraKeys(),
+                  if (kb) _whereStrip() else _contextRow(),
+                  SizedBox(height: kb ? 4 : 8),
+                  _keyRow(),
+                  if (!kb) _pageDots(),
                 ]),
               ),
             ),
           ]),
           if (_scrubFrom != null) _scrubOverlay(),
+          if (_lostError != null) _lostCard(),
         ]),
       ),
     );
@@ -1306,11 +1446,27 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
 
   double _barDx = 0;
 
-  Widget _topBar() {
-    final w = _window;
+  /// Link health: round circle under 150 ms, square under 400, diamond above (shape, not colour alone).
+  Widget _linkDot() {
+    final ms = _rttMs;
+    final (color, radius, turns) = _reconnecting || ms == null
+        ? (Tone.warn, 1.0, 0.0)
+        : ms < 150
+            ? (termPalette.value.ansi[10], 4.0, 0.0)
+            : ms < 400
+                ? (Tone.warn, 1.0, 0.0)
+                : (Tone.danger, 1.0, 0.125);
+    return RotationTransition(
+      turns: AlwaysStoppedAnimation(turns),
+      child: Container(
+          width: 7, height: 7, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(radius))),
+    );
+  }
+
+  /// Session chip, window tabs, minimap, keyboard. Swipe the row to step windows.
+  Widget _contextRow() {
     return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _sheet,
+      behavior: HitTestBehavior.translucent,
       // Distance OR velocity: a slow drag that stops before lifting has ~0 velocity.
       onHorizontalDragStart: (_) => _barDx = 0,
       onHorizontalDragUpdate: (d) => _barDx += d.delta.dx,
@@ -1320,57 +1476,82 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         if (dx.abs() > 200 || _barDx.abs() > 60) _stepWindow(dx < 0 ? 1 : -1);
       },
       child: SizedBox(
-        height: 48,
+        height: 44,
         child: Row(children: [
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text.rich(
-                      TextSpan(text: _session, children: [
-                        if (_rttMs case final ms?)
-                          TextSpan(
-                              text: '  ${ms}ms',
-                              style: TextStyle(
-                                  color: ms < 150
-                                      ? Colors.greenAccent.withValues(alpha: 0.7)
-                                      : ms < 400
-                                          ? Colors.amberAccent
-                                          : Colors.redAccent)),
-                      ]),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: Colors.white54, letterSpacing: 0.3)),
-                  Row(children: [
+          Semantics(
+            button: true,
+            label: 'Session $_session, switch',
+            child: Material(
+              color: Tone.raised,
+              borderRadius: BorderRadius.circular(10),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: _sheet,
+                child: Container(
+                  height: 36,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  constraints: const BoxConstraints(maxWidth: 130),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    _linkDot(),
+                    const SizedBox(width: 8),
                     Flexible(
-                      child: Text(w == null ? '…' : '${w.index}:${w.name}',
+                      child: Text(_session,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                          style: TextStyle(
+                              fontFamily: termFont.value, fontSize: 13, fontWeight: FontWeight.w500, color: Tone.text)),
                     ),
-                    if (w != null && _windows.length > 1)
-                      Text('  ${_windows.indexOf(w) + 1}/${_windows.length}',
-                          style: const TextStyle(fontSize: 11, color: Colors.white38)),
-                    if (w?.zoomed ?? false)
-                      Container(
-                        margin: const EdgeInsets.only(left: 6),
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: accent.withValues(alpha: 0.7)),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: const Text('Z', style: TextStyle(fontSize: 10, color: accent)),
-                      ),
+                    Icon(Icons.expand_more_rounded, size: 16, color: Tone.muted),
                   ]),
-                ]),
+                ),
+              ),
+            ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
+          // Tabs share the row (no scrolling: a sideways swipe here steps windows).
+          Expanded(
+            child: Row(children: [
+              for (final w in _windows)
+                Flexible(
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 2),
+                    child: Material(
+                      color: w.id == _winId ? accent.withValues(alpha: 0.14) : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                          if (w.id != _winId) _selectWindow(w.id);
+                        },
+                        onLongPress: () => _windowMenu(w),
+                        child: Container(
+                          height: 36,
+                          padding: const EdgeInsets.symmetric(horizontal: 9),
+                          constraints: const BoxConstraints(maxWidth: 140),
+                          child: Center(
+                            widthFactor: 1,
+                            child: Text('${w.index} ${w.name}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontFamily: termFont.value,
+                                    fontSize: 13,
+                                    fontWeight: w.id == _winId ? FontWeight.w600 : FontWeight.w400,
+                                    color: w.id == _winId ? accent : Tone.muted)),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ]),
+          ),
+          const SizedBox(width: 6),
           MiniMap(
             panes: _rects,
             currentId: _paneId,
-            size: const Size(36, 44), // phone-shaped
+            size: const Size(26, 34), // phone-shaped
             onTapPane: (id) {
               _slideFrom = Offset.zero;
               _showPane(id, select: true);
@@ -1381,20 +1562,43 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             onPanEnd: _scrubEnd,
             onPanCancel: _scrubCancel,
           ),
-          const SizedBox(width: 8),
-          _DockKey(tooltip: 'Overview', icon: Icons.grid_view_rounded, onTap: _openOverview),
           const SizedBox(width: 6),
           _DockKey(
-            tooltip: 'Keyboard',
-            icon: _keyboardUp ? Icons.keyboard_hide_rounded : Icons.keyboard_rounded,
-            on: _keyboardUp,
-            onTap: () {
-              final p = _panes[_paneId];
-              _keyboardUp ? p?.focus.unfocus() : _showKeyboard(p);
-            },
+            tooltip: 'Show keyboard',
+            icon: Icons.keyboard_rounded,
+            flat: true,
+            onTap: () => _showKeyboard(_panes[_paneId]),
           ),
         ]),
       ),
+    );
+  }
+
+  /// While typing: where you are, in one line (the context row folds away).
+  Widget _whereStrip() {
+    final w = _window, i = _rects.indexWhere((p) => p.id == _paneId);
+    return SizedBox(
+      height: 20,
+      child: Row(children: [
+        const SizedBox(width: 4),
+        _linkDot(),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            '$_session › ${w?.name ?? '…'}${_rects.length > 1 && i >= 0 ? ' · pane ${i + 1} of ${_rects.length}' : ''}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontFamily: termFont.value, fontSize: 11, color: Tone.muted),
+          ),
+        ),
+        InkWell(
+          onTap: () => _panes[_paneId]?.focus.unfocus(),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Icon(Icons.keyboard_hide_rounded, size: 18, color: Tone.muted, semanticLabel: 'Hide keyboard'),
+          ),
+        ),
+      ]),
     );
   }
 
@@ -1483,15 +1687,11 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
               ),
             ),
             if (h != null && h.$1 == r.id) _historyView(h.$2, font),
-            ..._edgeHints(),
-            if (_reconnecting)
-              const Align(
-                alignment: Alignment.topCenter,
-                child: IgnorePointer(child: _Pill('Reconnecting…', progress: true)),
-              ),
+            if (h == null) ..._edgeHints(),
+            if (_reconnecting) _reconnectBanner(),
           ]),
         );
-        if (!_joystick || h != null) return area; // history: the LIVE chip sits there
+        if (!joystickOn.value || h != null) return area; // history: the LIVE chip sits there
         // Outside the Listener: its drags must not count as terminal gestures (pull to history, pinch).
         final id = _paneId;
         const half = 36.0; // joystick radius
@@ -1534,11 +1734,41 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
         ]);
       });
 
+  Widget _reconnectBanner() => Align(
+        alignment: Alignment.topCenter,
+        child: Container(
+          margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+          padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+          decoration: BoxDecoration(
+            color: Color.alphaBlend(Tone.warn.withValues(alpha: 0.12), Tone.surface),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Tone.warn.withValues(alpha: 0.35)),
+          ),
+          child: Row(children: [
+            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Tone.warn)),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Text('Reconnecting${_tries > 1 ? ' · try $_tries' : '…'}',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Tone.warn)),
+                if (_why != null)
+                  Text(_why!, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: Tone.muted)),
+              ]),
+            ),
+            TextButton(
+              onPressed: _probe,
+              style: TextButton.styleFrom(foregroundColor: Tone.warn, minimumSize: const Size(48, 40)),
+              child: const Text('Now', style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+          ]),
+        ),
+      );
+
   /// Read-only tmux history over the live view, starting at the bottom (xterm sticks to the bottom).
   Widget _historyView(Terminal t, double font) => Stack(children: [
         Positioned.fill(
           child: ColoredBox(
-            color: const Color(0xF20A0C11),
+            color: Tone.ground.withValues(alpha: 0.96),
             child: MediaQuery.removePadding(
               context: context,
               removeTop: true,
@@ -1572,27 +1802,48 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
             ),
           ),
         ),
-        // How far back: lines above the live bottom (top right: the up-neighbour hint is top centre).
+        // How far back: lines above the live bottom.
         Align(
-          alignment: Alignment.topRight,
+          alignment: Alignment.topCenter,
           child: IgnorePointer(
             child: ListenableBuilder(
               listenable: _histScroll,
               builder: (context, _) {
                 final pos = _histScroll.hasClients ? _histScroll.position : null;
                 final back = pos != null && pos.hasContentDimensions ? (pos.extentAfter / _lineH).round() : 0;
-                return _Pill('History · ↑ $back lines');
+                return Container(
+                  margin: const EdgeInsets.only(top: 8),
+                  height: 30,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: Tone.surface.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(color: Tone.info.withValues(alpha: 0.4)),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.arrow_upward_rounded, size: 14, color: Tone.info),
+                    const SizedBox(width: 6),
+                    Text('History · $back lines up', style: TextStyle(fontSize: 13, color: Tone.info)),
+                  ]),
+                );
               },
             ),
           ),
         ),
         Positioned(
-          right: 12,
-          bottom: 12,
-          child: ActionChip(
-            avatar: const Icon(Icons.arrow_downward, size: 16),
-            label: const Text('LIVE'),
+          right: 16,
+          bottom: 16,
+          child: FilledButton.icon(
+            style: FilledButton.styleFrom(
+              backgroundColor: Tone.info,
+              foregroundColor: Tone.ground,
+              minimumSize: const Size(0, 48),
+              shape: const StadiumBorder(),
+              textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+            ),
             onPressed: _closeHistory,
+            icon: const Icon(Icons.vertical_align_bottom_rounded, size: 20),
+            label: const Text('Back to live'),
           ),
         ),
       ]);
@@ -1627,52 +1878,122 @@ class _PaneScreenState extends State<PaneScreen> with SingleTickerProviderStateM
     ];
   }
 
-  bool _keysPage2 = false;
+  final _keysPage = PageController();
+  int _keysPageAt = 0;
 
-  /// Two pages of equal-width keys (no sideways scrolling); ⋯ flips. Arrows repeat while held.
-  Widget _extraKeys() {
-    Widget key(String label, VoidCallback onTap, {bool on = false, bool repeat = false, int flex = 1}) =>
-        Expanded(
-          flex: flex,
-          child: _DockKey(label: label, on: on, repeat: repeat, onTap: onTap),
-        );
-    final more = key('⋯', () => setState(() => _keysPage2 = !_keysPage2), on: _keysPage2);
-    final keys = _keysPage2
-        ? [
-            key('^C', () => _bytes(const [0x03])),
-            key('Prefix', () => _bytes(const [0x02]), flex: 2),
-            key('Paste', _paste, flex: 2),
-            for (final s in const ['|', '~', '/', '-']) key(s, () => _text(s)),
-            more,
-          ]
-        : [
+  /// Eight equal keys a page; swipe sideways for the next page. Arrows repeat while held.
+  Widget _keyRow() {
+    Widget key(String label, VoidCallback onTap, {bool on = false, bool repeat = false, IconData? icon}) =>
+        Expanded(child: _DockKey(label: label, icon: icon, on: on, repeat: repeat, onTap: onTap));
+    Widget page(List<Widget> keys) => Row(children: [
+          for (var i = 0; i < keys.length; i++) ...[if (i > 0) const SizedBox(width: 4), keys[i]],
+        ]);
+    return SizedBox(
+      height: 44,
+      child: PageView(
+        controller: _keysPage,
+        onPageChanged: (i) => setState(() => _keysPageAt = i),
+        children: [
+          page([
             key('Esc', () => _key(TerminalKey.escape)),
             key('Tab', () => _key(TerminalKey.tab)),
             key('Ctrl', () => setState(() => _ctrl = !_ctrl), on: _ctrl),
             key('Alt', () => setState(() => _alt = !_alt), on: _alt),
-            key('←', () => _key(TerminalKey.arrowLeft), repeat: true),
-            key('↓', () => _key(TerminalKey.arrowDown), repeat: true),
-            key('↑', () => _key(TerminalKey.arrowUp), repeat: true),
-            key('→', () => _key(TerminalKey.arrowRight), repeat: true),
-            more,
-          ];
-    return SizedBox(
-      height: 44,
-      child: Row(children: [
-        for (var i = 0; i < keys.length; i++) ...[if (i > 0) const SizedBox(width: 4), keys[i]],
-      ]),
+            key('Left', () => _key(TerminalKey.arrowLeft), repeat: true, icon: Icons.arrow_back_rounded),
+            key('Down', () => _key(TerminalKey.arrowDown), repeat: true, icon: Icons.arrow_downward_rounded),
+            key('Up', () => _key(TerminalKey.arrowUp), repeat: true, icon: Icons.arrow_upward_rounded),
+            key('Right', () => _key(TerminalKey.arrowRight), repeat: true, icon: Icons.arrow_forward_rounded),
+          ]),
+          page([
+            key('^C', () => _bytes(const [0x03])),
+            key('^B', () => _bytes(const [0x02])),
+            key('Paste', _paste),
+            for (final s in const ['|', '~', '/', '-', '_']) key(s, () => _text(s)),
+          ]),
+        ],
+      ),
     );
   }
+
+  Widget _pageDots() => Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          for (var i = 0; i < 2; i++)
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              width: i == _keysPageAt ? 14 : 4,
+              height: 4,
+              decoration: BoxDecoration(
+                color: i == _keysPageAt ? Tone.text : Tone.faint,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+        ]),
+      );
+
+  // ---------- connection lost ----------
+
+  Widget _lostCard() => Positioned.fill(
+        child: ColoredBox(
+          color: Tone.ground.withValues(alpha: 0.82),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: SafeArea(
+              child: Container(
+                margin: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+                decoration: BoxDecoration(
+                  color: Tone.surface,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: Tone.line),
+                ),
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                          color: Tone.danger.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(14)),
+                      child: Icon(Icons.wifi_off_rounded, color: Tone.danger),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text('Can’t reach ${widget.title}',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: Tone.text)),
+                  const SizedBox(height: 8),
+                  Text('Tried for 5 minutes. Your tmux session keeps running on the server; nothing there is lost.',
+                      style: TextStyle(fontSize: 15, height: 1.45, color: Tone.muted)),
+                  const SizedBox(height: 8),
+                  Text(_lostError!,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontFamily: termFont.value, fontSize: 12, color: Tone.muted)),
+                  const SizedBox(height: 18),
+                  PillButton('Try again', icon: Icons.refresh_rounded, onPressed: () {
+                    setState(() => _lostError = null);
+                    _reconnectLoop();
+                  }),
+                  const SizedBox(height: 8),
+                  PillButton('All hosts', primary: false, onPressed: () => _exit(null)),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
-/// A key cap / dock button: 44 high, glass-on-glass fill, shrinks a little while pressed (120 ms),
-/// accent when [on] (sticky Ctrl/Alt, keyboard up). [repeat]: fires every 70 ms while held.
+/// A key cap / bar button: flat raised fill (none when [flat]), accent when [on] (sticky Ctrl/Alt,
+/// keyboard up), dims and shrinks a little while pressed. [repeat]: fires every 70 ms while held.
 class _DockKey extends StatefulWidget {
   final String? label, tooltip;
   final IconData? icon;
-  final bool on, repeat;
+  final bool on, repeat, flat;
   final VoidCallback onTap;
-  const _DockKey({this.label, this.icon, this.tooltip, this.on = false, this.repeat = false, required this.onTap});
+  const _DockKey(
+      {this.label, this.icon, this.tooltip, this.on = false, this.repeat = false, this.flat = false, required this.onTap});
   @override
   State<_DockKey> createState() => _DockKeyState();
 }
@@ -1698,29 +2019,34 @@ class _DockKeyState extends State<_DockKey> {
   @override
   Widget build(BuildContext context) {
     final on = widget.on;
-    final fg = on ? Colors.black : Colors.white.withValues(alpha: 0.92);
+    final fg = on ? Tone.onAccent : widget.flat ? Tone.muted : Tone.text;
+    final fill = on
+        ? accent
+        : widget.flat
+            ? (_down ? Tone.raised : Colors.transparent)
+            : (_down ? Tone.pressed : Tone.raised);
     final cap = AnimatedScale(
-      scale: _down ? 0.92 : 1,
-      duration: const Duration(milliseconds: 120),
+      scale: _down ? 0.94 : 1,
+      duration: const Duration(milliseconds: 100),
       curve: Curves.easeOut,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        height: 44,
-        constraints: widget.icon != null ? const BoxConstraints(minWidth: 44) : null,
+        duration: const Duration(milliseconds: 120),
+        height: widget.label == null ? 44 : 42,
+        constraints: widget.label == null ? const BoxConstraints(minWidth: 44) : null,
         alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: on ? accent : Colors.white.withValues(alpha: _down ? 0.2 : 0.08),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white.withValues(alpha: on ? 0 : 0.08), width: 0.5),
-        ),
+        decoration: BoxDecoration(color: fill, borderRadius: BorderRadius.circular(10)),
         child: widget.icon != null
-            ? Icon(widget.icon, size: 22, color: fg)
+            ? Icon(widget.icon, size: widget.label == null ? 22 : 18, color: fg)
             : FittedBox(
                 fit: BoxFit.scaleDown,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   child: Text(widget.label!,
-                      style: TextStyle(fontSize: 15, fontWeight: on ? FontWeight.w600 : FontWeight.w500, color: fg)),
+                      style: TextStyle(
+                          fontFamily: termFont.value,
+                          fontSize: 14,
+                          fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                          color: fg)),
                 ),
               ),
       ),
@@ -1753,40 +2079,10 @@ class _DockKeyState extends State<_DockKey> {
   }
 }
 
-/// iOS-style inset group in the sheets: rows on a rounded, slightly lighter card.
-class _Group extends StatelessWidget {
-  final List<Widget> children;
-  const _Group({required this.children});
-  @override
-  Widget build(BuildContext context) => Container(
-        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.06),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.06), width: 0.5),
-        ),
-        child: Material(type: MaterialType.transparency, child: Column(children: children)),
-      );
-}
-
-/// Section label in the bottom sheets.
-class _Header extends StatelessWidget {
-  final String text;
-  const _Header(this.text);
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(28, 14, 28, 6),
-        child: Text(text.toUpperCase(),
-            style: const TextStyle(fontSize: 11, letterSpacing: 1.2, color: accent, fontWeight: FontWeight.w600)),
-      );
-}
-
-/// Slim translucent label over the terminal.
+/// Slim translucent label over the terminal (edge hints).
 class _Pill extends StatelessWidget {
   final String text;
-  final bool progress;
-  const _Pill(this.text, {this.progress = false});
+  const _Pill(this.text);
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -1794,15 +2090,9 @@ class _Pill extends StatelessWidget {
         child: Glass(
           radius: const BorderRadius.all(Radius.circular(14)),
           blur: 12,
-          strength: 0.8,
+          strength: 0.6,
           padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (progress) ...[
-              const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.5)),
-              const SizedBox(width: 6),
-            ],
-            Text(text, style: const TextStyle(fontSize: 12, color: Colors.white)),
-          ]),
+          child: Text(text, style: TextStyle(fontFamily: termFont.value, fontSize: 12, color: Tone.muted)),
         ),
       );
 }

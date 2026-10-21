@@ -307,6 +307,14 @@ class TmuxClient {
   Future<void> split(int paneId, {required bool horizontal}) =>
       cmd('split-window ${horizontal ? '-h' : '-v'} -t %$paneId');
   Future<void> killPane(int paneId) => cmd('kill-pane -t %$paneId');
+  /// Tells tmux the colours this client shows for the pane, so it answers programs' OSC 10/11
+  /// colour queries with them (control clients only; tmux 3.4+). [osc]: e.g. `11;rgb:2828/2828/2828`.
+  Future<void> reportColor(int paneId, String osc) => cmd('refresh-client -r "%$paneId:\\e]$osc\\e\\\\"');
+  Future<void> killWindow(int windowId) => cmd('kill-window -t @$windowId');
+  Future<void> renameWindow(int windowId, String name) => cmd('rename-window -t @$windowId ${_q(name)}');
+
+  /// Moves the pane out into a window of its own.
+  Future<void> breakPane(int paneId) => cmd('break-pane -s %$paneId');
   Future<void> toggleZoom(int paneId) => cmd('resize-pane -Z -t %$paneId');
 
   /// Zooms the pane unless its window is already zoomed (checked by tmux, so no race with our cache).

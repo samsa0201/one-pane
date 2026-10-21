@@ -34,4 +34,21 @@ void main() {
     expect(t.buffer.lines[0].getAttributes(0) & CellAttr.underline, 0);
     expect(t.buffer.lines[0].getAttributes(0) & CellAttr.faint, 0);
   });
+
+  group('blend backgrounds', () {
+    final f = TermFilter(blend: () => true);
+    test('near-black truecolor background becomes the default', () {
+      expect(f.add('\x1b[48;2;30;30;46mx'), '\x1b[49mx');
+      expect(f.add('\x1b[38;2;200;0;0;48;2;0;0;0mx'), '\x1b[38;2;200;0;0;49mx');
+    });
+    test('lighter backgrounds, 256-colour black and colon form', () {
+      expect(f.add('\x1b[48;2;80;80;80mx'), '\x1b[48;2;80;80;80mx');
+      expect(f.add('\x1b[48;5;234mx'), '\x1b[49mx');
+      expect(f.add('\x1b[48;5;160mx'), '\x1b[48;5;160mx');
+      expect(f.add('\x1b[48:2::10:10:10mx'), '\x1b[49mx');
+    });
+    test('off: untouched', () {
+      expect(TermFilter().add('\x1b[48;2;0;0;0mx'), '\x1b[48;2;0;0;0mx');
+    });
+  });
 }

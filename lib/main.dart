@@ -2,11 +2,13 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'ssh/connection.dart';
 import 'ui/fonts.dart';
 import 'ui/glass.dart';
 import 'ui/hosts_screen.dart';
+import 'ui/settings_screen.dart';
 
 // Debug-only: `--dart-define=POCKET_SEED=<base64 json of HostConfig + "key">` adds a host on first run,
 // so on-device testing does not need typing a PEM key.
@@ -23,6 +25,8 @@ Future<void> main() async {
   }
   await loadGlassPref();
   await loadFontPref();
+  await loadThemePrefs();
+  await loadSettings();
   runApp(const MyApp());
 }
 
@@ -30,21 +34,87 @@ class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'tmux pocket',
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        colorSchemeSeed: const Color(0xFF4FC3F7),
-        // Screens are see-through: the ambient (and glass over it) is the background everywhere.
-        scaffoldBackgroundColor: Colors.transparent,
-        appBarTheme: const AppBarTheme(backgroundColor: Colors.transparent, surfaceTintColor: Colors.transparent),
-        bottomSheetTheme: const BottomSheetThemeData(showDragHandle: true),
-        snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
-        listTileTheme: const ListTileThemeData(selectedTileColor: Color(0x224FC3F7)),
-      ),
-      builder: (context, child) => Stack(fit: StackFit.expand, children: [const Ambient(), child!]),
-      home: const HostsScreen(),
-    );
-  }
+  Widget build(BuildContext context) => ValueListenableBuilder<TermPalette>(
+        valueListenable: termPalette,
+        builder: (context, t, _) {
+          final light = t.light;
+          final scheme = ColorScheme.fromSeed(seedColor: accent, brightness: light ? Brightness.light : Brightness.dark)
+              .copyWith(
+            primary: accent,
+            onPrimary: Tone.onAccent,
+            surface: Tone.surface,
+            onSurface: Tone.text,
+            onSurfaceVariant: Tone.muted,
+            surfaceContainerHigh: Tone.raised,
+            surfaceContainerHighest: Tone.raised,
+            outlineVariant: Tone.line,
+            error: Tone.danger,
+          );
+          final icons = light ? Brightness.dark : Brightness.light;
+          return AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: icons,
+              statusBarBrightness: light ? Brightness.light : Brightness.dark,
+              systemNavigationBarColor: Tone.surface,
+              systemNavigationBarIconBrightness: icons,
+            ),
+            child: MaterialApp(
+              title: 'One Pane',
+              theme: ThemeData(
+                colorScheme: scheme,
+                scaffoldBackgroundColor: Tone.ground,
+                canvasColor: Tone.ground,
+                dividerColor: Tone.line,
+                appBarTheme: AppBarTheme(
+                  backgroundColor: Tone.ground,
+                  surfaceTintColor: Colors.transparent,
+                  foregroundColor: Tone.text,
+                  elevation: 0,
+                  scrolledUnderElevation: 0,
+                ),
+                snackBarTheme: SnackBarThemeData(
+                  behavior: SnackBarBehavior.floating,
+                  backgroundColor: Tone.pressed,
+                  contentTextStyle: TextStyle(color: Tone.text),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                listTileTheme: ListTileThemeData(
+                  iconColor: Tone.muted,
+                  textColor: Tone.text,
+                  subtitleTextStyle: TextStyle(fontSize: 13, color: Tone.muted),
+                  selectedColor: accent,
+                  selectedTileColor: accent.withValues(alpha: 0.08),
+                ),
+                switchTheme: SwitchThemeData(
+                  trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+                  thumbColor: WidgetStateProperty.resolveWith(
+                      (s) => s.contains(WidgetState.selected) ? Tone.onAccent : Tone.muted),
+                  trackColor: WidgetStateProperty.resolveWith(
+                      (s) => s.contains(WidgetState.selected) ? accent : Tone.raised),
+                ),
+                inputDecorationTheme: InputDecorationTheme(
+                  filled: true,
+                  fillColor: Tone.raised,
+                  labelStyle: TextStyle(color: Tone.muted),
+                  floatingLabelStyle: TextStyle(color: accent),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                  enabledBorder:
+                      OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: accent, width: 1.5)),
+                  errorBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: Tone.danger, width: 1.5)),
+                ),
+                dialogTheme: DialogThemeData(backgroundColor: Tone.raised),
+                popupMenuTheme: PopupMenuThemeData(color: Tone.raised),
+                sliderTheme: SliderThemeData(activeTrackColor: accent, thumbColor: accent, inactiveTrackColor: Tone.raised),
+                progressIndicatorTheme: ProgressIndicatorThemeData(color: accent),
+              ),
+              home: const HostsScreen(),
+            ),
+          );
+        },
+      );
 }

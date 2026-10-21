@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tmux_pocket/tmux/layout.dart';
 import 'package:tmux_pocket/ui/minimap.dart';
+import 'package:tmux_pocket/ui/theme.dart';
 
 // 160x48 window: %0 left half, %1 top-right, %2 bottom-right.
 const panes = [
