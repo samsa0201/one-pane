@@ -17,6 +17,11 @@ const _seed = String.fromEnvironment('POCKET_SEED');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Bundled fonts' licenses, for Settings › Open-source licenses.
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks(['Hack Nerd Font'], await rootBundle.loadString('assets/fonts/HackNerdFont-LICENSE.md'));
+    yield LicenseEntryWithLineBreaks(['Noto Sans Symbols'], await rootBundle.loadString('assets/fonts/NotoSans-OFL.txt'));
+  });
   if (kDebugMode && _seed.isNotEmpty) {
     final store = HostStore();
     final j = jsonDecode(utf8.decode(base64.decode(_seed))) as Map<String, dynamic>;

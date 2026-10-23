@@ -147,6 +147,13 @@ class SettingsScreen extends StatelessWidget {
                       Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const KnownHostsScreen())),
                 ),
               ]),
+              const SectionLabel('About'),
+              Group(children: [
+                NavRow(
+                  title: 'Open-source licenses',
+                  onTap: () => showLicensePage(context: context, applicationName: 'One Pane'),
+                ),
+              ]),
             ]);
           },
         ),

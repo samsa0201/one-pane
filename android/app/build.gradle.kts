@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -15,8 +17,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.samsa.tmux_pocket"
+        applicationId = "com.samsa.onepane"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -29,13 +30,24 @@ android {
         versionName = flutter.versionName
     }
 
+    // Upload key for Play, kept outside the repo (ONE_PANE_KEY_PROPERTIES or ~/.config/one-pane/key.properties).
+    // Without it release builds are signed with the debug key.
+    val keyFile = file(System.getenv("ONE_PANE_KEY_PROPERTIES") ?: "${System.getProperty("user.home")}/.config/one-pane/key.properties")
+    if (keyFile.exists()) {
+        val key = Properties().apply { keyFile.inputStream().use { load(it) } }
+        signingConfigs.create("upload") {
+            storeFile = file(key.getProperty("storeFile"))
+            storePassword = key.getProperty("storePassword")
+            keyAlias = key.getProperty("keyAlias")
+            keyPassword = key.getProperty("keyPassword")
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("upload") ?: signingConfigs.getByName("debug")
             // R8 breaks shared_preferences' JNI bridge (NoSuchMethodError ...SharedPreferencesApiRegistrar.getAll,
-            // release only): hosts were never saved. Size cost is small for a sideloaded app.
+            // release only): hosts were never saved. Size cost is small.
             isMinifyEnabled = false
             isShrinkResources = false
         }
