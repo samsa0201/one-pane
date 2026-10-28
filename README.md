@@ -81,3 +81,4 @@ clipboard (newlines as Enter), as a bracketed paste when the program asked for i
 - On the emulator: `./tool_seed.sh` prints a debug-only `--dart-define=POCKET_SEED=...` that adds a
   test host (`10.0.2.2:2222`, a user-level sshd with its own key, `tmux -L pocket`) on first run.
 - Architecture and protocol notes: `docs/architecture.md`.
+# one-pane
